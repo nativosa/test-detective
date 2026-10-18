@@ -54,6 +54,7 @@ Go only as far as you need to reach a well-supported conclusion. Record each ite
    - `unzip -l <trace.zip>` lists the contents.
    - `unzip -p <trace.zip> '*.trace' | grep -E '"error"|"console"|pageError' | head -n 30` shows action errors and console output.
    - `unzip -p <trace.zip> '*.network' | grep -E '"status":\s*[45][0-9]{2}|"failure"' | head -n 20` shows HTTP errors and failed requests.
+   - `unzip -p <trace.zip> '*.network' | grep -oE '"url":"[^"]*"|"_wasFulfilled":true' | head -n 40` shows which requests the test answered itself (`"_wasFulfilled":true` follows the mocked request's URL).
 
 ## Step 4: Classify
 
@@ -62,6 +63,8 @@ Pick exactly one:
 - **Application defect**: the app misbehaves. Examples: a 5xx response, a JS error, a broken or missing feature that the test reasonably expects.
 - **Environment issue**: the run conditions failed. Examples: DNS/connection errors, browser launch failure, missing browsers, a timeout with no app response, path or setup problems.
 - **Inconclusive**: the evidence is missing or conflicting. State what additional evidence would resolve it.
+
+**Mocked responses are not application defects.** Before classifying a 4xx/5xx or failed request as an application defect, check whether the test produced it: look for `page.route`, `context.route`, `route.fulfill` or `route.abort` in the spec, and for `"_wasFulfilled":true` on that request in the trace's `.network` file. If the test mocked the failing response and then expected success, classify it as a **Test-code defect** (the test contradicts itself) and cite both pieces of evidence.
 
 Confidence: **High** means direct evidence explains the failure and nothing contradicts it. **Medium** means the explanation is likely but rests on partial evidence or inference. **Low** means the evidence is thin, missing or mismatched.
 
