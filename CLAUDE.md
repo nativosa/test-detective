@@ -47,6 +47,14 @@ The future investigation agent depends on these paths. Don't change them without
 
 Local runs use no retries, so flaky failures surface instead of being hidden. CI uses 1 retry.
 
+## Claude Code Skills
+
+| Skill | Invocation | Purpose |
+|---|---|---|
+| `investigate-failure` | `/investigate-failure [test title or spec]` | Read-only root-cause report for failed tests, built from the artifact contract above |
+
+Skills live in `.claude/skills/<name>/SKILL.md`. `investigate-failure` must stay read-only: it never edits files, reruns tests, or contacts external services. If you change the artifact contract, update the Skill too.
+
 ## Planned layout (future stages; do not create yet)
 
 ```
