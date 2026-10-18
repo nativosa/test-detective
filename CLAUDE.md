@@ -55,6 +55,8 @@ Local runs use no retries, so flaky failures surface instead of being hidden. CI
 
 Skills live in `.claude/skills/<name>/SKILL.md`. `investigate-failure` must stay read-only: it never edits files, reruns tests, or contacts external services. If you change the artifact contract, update the Skill too.
 
+When classifying, the Skill treats an HTTP error the test mocked itself (`page.route` / `route.fulfill`, or `"_wasFulfilled":true` in the trace) as a test-code defect, not an application defect. Keep that rule if you edit its classification step.
+
 ## Planned layout (future stages; do not create yet)
 
 ```
