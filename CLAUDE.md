@@ -57,6 +57,16 @@ Skills live in `.claude/skills/<name>/SKILL.md`. `investigate-failure` must stay
 
 When classifying, the Skill treats an HTTP error the test mocked itself (`page.route` / `route.fulfill`, or `"_wasFulfilled":true` in the trace) as a test-code defect, not an application defect. Keep that rule if you edit its classification step.
 
+## Claude Code Subagents
+
+| Subagent | Invocation | Purpose |
+|---|---|---|
+| `failure-investigator` | "Use the failure-investigator subagent to investigate <test or spec>", or `@agent-failure-investigator` | Runs the `investigate-failure` Skill in a separate context and returns only its report |
+
+Subagents live in `.claude/agents/<name>.md`. Run the Skill directly when you want a quick inline look. Delegate to the subagent when you want to keep raw artifacts out of the main context.
+
+`failure-investigator` preloads the Skill through `skills:`. Don't copy the Skill's procedure into the agent file; edit the Skill instead. The agent is meant to stay read-only. Its tool allowlist (`Read, Grep, Glob, Bash`) and `permissionMode: dontAsk` reduce risk, but they aren't a hard security boundary. Bash can still write files, and if the parent session is in `acceptEdits`, `auto` or `bypassPermissions`, the parent's mode overrides `dontAsk`. Delegate from Default (manual approval) mode.
+
 ## Planned layout (future stages; do not create yet)
 
 ```
