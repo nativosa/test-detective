@@ -1,0 +1,54 @@
+{
+  "config": {
+    "configFile": "C:\\ci\\repo\\playwright.config.ts",
+    "rootDir": "C:/ci/repo/tests",
+    "version": "1.64.1",
+    "projects": [{ "id": "chromium", "name": "chromium", "retries": 0 }]
+  },
+  "suites": [
+    {
+      "title": "ui\\checkboxes.spec.ts",
+      "file": "ui/checkboxes.spec.ts",
+      "line": 0,
+      "column": 0,
+      "specs": [
+        {
+          "title": "toggles checkboxes",
+          "ok": true,
+          "tags": [],
+          "id": "9103071261929cc4ec83-06b2b2163ffa0c9234d3",
+          "file": "ui/checkboxes.spec.ts",
+          "line": 3,
+          "column": 1,
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "status": "expected",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "passed",
+                  "duration": 2517,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-19T16:07:47.973Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": { "startTime": "2026-10-19T16:07:46.933Z", "duration": 8805.066, "expected": 1, "skipped": 0, "unexpected": 0, "flaky": 0 }
+}

@@ -1,0 +1,218 @@
+{
+  "config": {
+    "configFile": "C:\\ci\\repo\\playwright.config.ts",
+    "rootDir": "C:/ci/repo/tests",
+    "version": "1.64.1",
+    "projects": [
+      { "id": "chromium", "name": "chromium", "retries": 1 },
+      { "id": "firefox", "name": "firefox", "retries": 1 }
+    ]
+  },
+  "suites": [
+    {
+      "title": "ui\\cart.spec.ts",
+      "file": "ui/cart.spec.ts",
+      "line": 0,
+      "column": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "cart",
+          "file": "ui/cart.spec.ts",
+          "line": 3,
+          "column": 6,
+          "specs": [],
+          "suites": [
+            {
+              "title": "checkout",
+              "file": "ui/cart.spec.ts",
+              "line": 4,
+              "column": 8,
+              "specs": [
+                {
+                  "title": "applies discount",
+                  "ok": false,
+                  "tags": [],
+                  "id": "1111111111aaaaaaaaaa-2222222222aaaaaaaaaa",
+                  "file": "ui/cart.spec.ts",
+                  "line": 5,
+                  "column": 9,
+                  "tests": [
+                    {
+                      "timeout": 30000,
+                      "annotations": [],
+                      "expectedStatus": "passed",
+                      "projectId": "chromium",
+                      "projectName": "chromium",
+                      "status": "unexpected",
+                      "results": [
+                        {
+                          "status": "failed",
+                          "retry": 0,
+                          "duration": 100,
+                          "startTime": "2026-10-19T16:00:00.000Z",
+                          "error": { "message": "Error: expect(received).toBe(expected)\n\nExpected: 90\nReceived: 100", "location": { "file": "C:\\ci\\repo\\tests\\ui\\cart.spec.ts", "line": 7, "column": 20 } },
+                          "errors": [],
+                          "attachments": [
+                            { "name": "outside", "contentType": "text/plain", "path": "C:\\Windows\\System32\\drivers\\etc\\hosts" },
+                            { "name": "unc", "contentType": "text/plain", "path": "\\\\fileserver\\share\\secret.txt" },
+                            { "name": "traversal", "contentType": "text/plain", "path": "test-results\\..\\..\\..\\etc\\passwd" },
+                            { "name": "posix-on-windows-report", "contentType": "text/plain", "path": "/etc/passwd" },
+                            { "name": "drive-relative", "contentType": "text/plain", "path": "C:secret.txt" },
+                            { "name": "nul-byte", "contentType": "text/plain", "path": "C:\\ci\\repo\\test-results\\a\u0000b.txt" }
+                          ]
+                        },
+                        {
+                          "status": "failed",
+                          "retry": 1,
+                          "duration": 100,
+                          "startTime": "2026-10-19T16:00:01.000Z",
+                          "error": { "message": "Error: expect(received).toBe(expected)\n\nExpected: 90\nReceived: 100" },
+                          "errors": [],
+                          "attachments": []
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "title": "applies discount",
+                  "ok": false,
+                  "tags": [],
+                  "id": "1111111111aaaaaaaaaa-3333333333aaaaaaaaaa",
+                  "file": "ui/cart.spec.ts",
+                  "line": 5,
+                  "column": 9,
+                  "tests": [
+                    {
+                      "timeout": 30000,
+                      "annotations": [],
+                      "expectedStatus": "passed",
+                      "projectId": "firefox",
+                      "projectName": "firefox",
+                      "status": "unexpected",
+                      "results": [
+                        {
+                          "status": "timedOut",
+                          "retry": 0,
+                          "duration": 30000,
+                          "startTime": "2026-10-19T16:00:00.000Z",
+                          "error": { "message": "Test timeout of 30000ms exceeded." },
+                          "errors": [
+                            { "message": "Test timeout of 30000ms exceeded." },
+                            { "message": "Error: locator.click: Test timeout of 30000ms exceeded.\nCall log:\n  - waiting for getByRole('button', { name: 'Apply' })", "location": { "file": "C:\\ci\\repo\\tests\\ui\\cart.spec.ts", "line": 6, "column": 50 } }
+                          ],
+                          "attachments": []
+                        },
+                        {
+                          "status": "failed",
+                          "retry": 1,
+                          "duration": 200,
+                          "startTime": "2026-10-19T16:00:31.000Z",
+                          "error": { "message": "Error: expect(received).toBe(expected)\n\nExpected: 90\nReceived: 100" },
+                          "errors": [],
+                          "attachments": []
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "title": "applies discount",
+                  "ok": false,
+                  "tags": [],
+                  "id": "1111111111aaaaaaaaaa-4444444444aaaaaaaaaa",
+                  "file": "ui/cart.spec.ts",
+                  "line": 5,
+                  "column": 9,
+                  "tests": [
+                    {
+                      "timeout": 30000,
+                      "annotations": [],
+                      "expectedStatus": "passed",
+                      "projectId": "chromium",
+                      "projectName": "chromium",
+                      "status": "unexpected",
+                      "results": [
+                        { "status": "failed", "retry": 0, "error": { "message": "repeat 1, attempt 0" }, "errors": [], "attachments": [] },
+                        { "status": "failed", "retry": 1, "error": { "message": "repeat 1, attempt 1" }, "errors": [], "attachments": [] }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "ui\\search.spec.ts",
+      "file": "ui/search.spec.ts",
+      "line": 0,
+      "column": 0,
+      "specs": [
+        {
+          "title": "finds results",
+          "ok": true,
+          "tags": [],
+          "id": "5555555555aaaaaaaaaa-6666666666aaaaaaaaaa",
+          "file": "ui/search.spec.ts",
+          "line": 3,
+          "column": 5,
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "status": "flaky",
+              "results": [
+                {
+                  "status": "failed",
+                  "retry": 0,
+                  "duration": 500,
+                  "startTime": "2026-10-19T16:00:00.000Z",
+                  "error": { "message": "Error: expect(locator).toBeVisible() failed" },
+                  "errors": [{ "message": "Error: expect(locator).toBeVisible() failed" }],
+                  "attachments": [
+                    { "name": "trace", "contentType": "application/zip", "path": "C:\\ci\\repo\\test-results\\ui-search-finds-results-chromium\\trace.zip" }
+                  ]
+                },
+                { "status": "passed", "retry": 1, "duration": 400, "startTime": "2026-10-19T16:00:01.000Z", "errors": [], "attachments": [] }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "merged across projects",
+          "ok": false,
+          "tags": [],
+          "id": "5555555555aaaaaaaaaa-7777777777aaaaaaaaaa",
+          "file": "ui/search.spec.ts",
+          "line": 9,
+          "column": 5,
+          "tests": [
+            {
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "status": "expected",
+              "results": [{ "status": "passed", "retry": 0, "errors": [], "attachments": [] }]
+            },
+            {
+              "expectedStatus": "passed",
+              "projectId": "firefox",
+              "projectName": "firefox",
+              "status": "unexpected",
+              "results": [{ "status": "failed", "retry": 0, "error": { "message": "merged firefox failure" }, "errors": [], "attachments": [] }]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": { "startTime": "2026-10-19T16:00:00.000Z", "duration": 60000, "expected": 1, "skipped": 0, "unexpected": 4, "flaky": 1 }
+}

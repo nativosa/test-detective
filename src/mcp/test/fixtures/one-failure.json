@@ -1,0 +1,117 @@
+{
+  "config": {
+    "configFile": "C:\\ci\\repo\\playwright.config.ts",
+    "rootDir": "C:/ci/repo/tests",
+    "version": "1.64.1",
+    "projects": [{ "id": "chromium", "name": "chromium", "retries": 0 }]
+  },
+  "suites": [
+    {
+      "title": "ui\\login.spec.ts",
+      "file": "ui/login.spec.ts",
+      "line": 0,
+      "column": 0,
+      "specs": [
+        {
+          "title": "logs in with valid credentials",
+          "ok": false,
+          "tags": ["smoke"],
+          "id": "aaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbb",
+          "file": "ui/login.spec.ts",
+          "line": 3,
+          "column": 5,
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "status": "unexpected",
+              "results": [
+                {
+                  "workerIndex": 0,
+                  "parallelIndex": 0,
+                  "status": "failed",
+                  "duration": 10432,
+                  "error": {
+                    "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoContainText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator: locator('#flash')\nExpected substring: \u001b[32m\"You logged into a secure area!\"\u001b[39m\nReceived string:    \u001b[31m\"Your username is invalid!\"\u001b[39m\nTimeout: 10000ms",
+                    "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoContainText\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m failed\n\nLocator: locator('#flash')\nExpected substring: \u001b[32m\"You logged into a secure area!\"\u001b[39m\nReceived string:    \u001b[31m\"Your username is invalid!\"\u001b[39m\nTimeout: 10000ms\n    at C:\\ci\\repo\\tests\\ui\\login.spec.ts:11:41",
+                    "location": { "file": "C:\\ci\\repo\\tests\\ui\\login.spec.ts", "line": 11, "column": 41 },
+                    "snippet": "\u001b[0m \u001b[90m 10 |\u001b[39m   \u001b[36mawait\u001b[39m expect(page)\u001b[33m.\u001b[39mtoHaveURL(\u001b[35m/\\/secure$/\u001b[39m)\u001b[33m;\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 11 |\u001b[39m   \u001b[36mawait\u001b[39m expect(page\u001b[33m.\u001b[39mlocator(\u001b[32m'#flash'\u001b[39m))\u001b[33m.\u001b[39mtoContainText(\u001b[32m'You logged into a secure area!'\u001b[39m)\u001b[33m;\u001b[39m\u001b[0m"
+                  },
+                  "errors": [
+                    {
+                      "location": { "file": "C:\\ci\\repo\\tests\\ui\\login.spec.ts", "line": 11, "column": 41 },
+                      "message": "Error: expect(locator).toContainText(expected) failed\n\n  at C:\\ci\\repo\\tests\\ui\\login.spec.ts:11:41"
+                    }
+                  ],
+                  "stdout": [{ "text": "hello\n" }],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-19T16:07:47.973Z",
+                  "annotations": [],
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "contentType": "image/png",
+                      "path": "C:\\ci\\repo\\test-results\\ui-login-logs-in-with-valid-credentials-chromium\\test-failed-1.png"
+                    },
+                    {
+                      "name": "trace",
+                      "contentType": "application/zip",
+                      "path": "C:\\ci\\repo\\test-results\\ui-login-logs-in-with-valid-credentials-chromium\\trace.zip"
+                    },
+                    {
+                      "name": "error-context",
+                      "contentType": "text/markdown",
+                      "path": "C:\\CI\\Repo\\test-results\\ui-login-logs-in-with-valid-credentials-chromium\\error-context.md"
+                    },
+                    { "name": "note", "contentType": "text/plain", "body": "SU5MSU5FLUJPRFktU0VDUkVU" }
+                  ],
+                  "errorLocation": { "file": "C:\\ci\\repo\\tests\\ui\\login.spec.ts", "line": 11, "column": 41 }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "shows the login form",
+          "ok": true,
+          "tags": [],
+          "id": "aaaaaaaaaaaaaaaaaaaa-cccccccccccccccccccc",
+          "file": "ui/login.spec.ts",
+          "line": 14,
+          "column": 5,
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "status": "expected",
+              "results": [
+                {
+                  "workerIndex": 1,
+                  "parallelIndex": 1,
+                  "status": "passed",
+                  "duration": 900,
+                  "errors": [],
+                  "stdout": [],
+                  "stderr": [],
+                  "retry": 0,
+                  "startTime": "2026-10-19T16:07:47.973Z",
+                  "annotations": [],
+                  "attachments": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": { "startTime": "2026-10-19T16:07:46.933Z", "duration": 12000, "expected": 1, "skipped": 0, "unexpected": 1, "flaky": 0 }
+}

@@ -1,0 +1,17 @@
+{
+  "config": {
+    "configFile": "C:\\ci\\repo\\playwright.config.ts",
+    "rootDir": "C:/ci/repo/tests",
+    "version": "1.64.1",
+    "projects": [{ "id": "chromium", "name": "chromium", "retries": 0 }]
+  },
+  "suites": [],
+  "errors": [
+    {
+      "message": "Error: \u001b[31mCannot find module './helpers'\u001b[39m",
+      "stack": "Error: Cannot find module './helpers'\n    at C:\\ci\\repo\\tests\\ui\\login.spec.ts:2:1",
+      "location": { "file": "C:\\ci\\repo\\tests\\ui\\login.spec.ts", "line": 2, "column": 1 }
+    }
+  ],
+  "stats": { "startTime": "2026-10-19T16:00:00.000Z", "duration": 300, "expected": 0, "skipped": 0, "unexpected": 0, "flaky": 0 }
+}

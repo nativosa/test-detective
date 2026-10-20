@@ -6,22 +6,24 @@ Conventions for working on test-detective, for both human contributors and Claud
 
 An AI-assisted tool that investigates failed Playwright tests. A parallel goal is learning Claude Code features (Skills, Subagents, Hooks, MCP, Agent SDK) by using them deliberately. Favor explaining and teaching over silently delegating.
 
-## Current stage: 1 (Playwright foundation)
+## Current stage: 2.3 (local MCP server)
 
-In scope: the Playwright suite, its config, reporting, and docs.
+In scope: the Playwright suite, its config and reporting, the `investigate-failure` Skill, the `failure-investigator` Subagent, the read-only MCP server in `src/mcp/`, and docs.
 
-**Do not build yet:** the AI agent, a dashboard, MCP integrations, CI/cloud infrastructure. Propose these, but don't implement them without explicit approval.
+**Do not build yet:** an autonomous AI agent (Agent SDK), Hooks, a dashboard, HTTP MCP transport, CI/cloud infrastructure. Propose these, but don't implement them without explicit approval.
 
 ## Commands
 
 ```sh
 npm run typecheck     # tsc --noEmit
-npm test              # full suite
+npm test              # full Playwright suite (needs network)
+npm run test:mcp      # MCP server unit + protocol tests (node:test, offline)
+npm run mcp           # start the MCP server on stdio
 npm run test:repeat   # initial stability check (--repeat-each=5)
 npm run report        # open HTML report
 ```
 
-Before declaring a change done, run `npm run typecheck` and `npm test` and report the results honestly.
+Before declaring a change done, run `npm run typecheck` plus the relevant tests (`npm test` for the UI suite, `npm run test:mcp` for `src/mcp/`) and report the results honestly.
 
 ## Test conventions
 
@@ -35,7 +37,7 @@ Before declaring a change done, run `npm run typecheck` and `npm test` and repor
 
 ## Artifact contract
 
-The future investigation agent depends on these paths. Don't change them without updating this file and the README.
+The Skill, the Subagent and the MCP server (`src/mcp/report.ts`) depend on these paths. Don't change them without updating this file and the README.
 
 | Path | Contents |
 |---|---|
@@ -66,6 +68,24 @@ When classifying, the Skill treats an HTTP error the test mocked itself (`page.r
 Subagents live in `.claude/agents/<name>.md`. Run the Skill directly when you want a quick inline look. Delegate to the subagent when you want to keep raw artifacts out of the main context.
 
 `failure-investigator` preloads the Skill through `skills:`. Don't copy the Skill's procedure into the agent file; edit the Skill instead. The agent is meant to stay read-only. Its tool allowlist (`Read, Grep, Glob, Bash`) and `permissionMode: dontAsk` reduce risk, but they aren't a hard security boundary. Bash can still write files, and if the parent session is in `acceptEdits`, `auto` or `bypassPermissions`, the parent's mode overrides `dontAsk`. Delegate from Default (manual approval) mode.
+
+## MCP server
+
+| Tool | Input | Purpose |
+|---|---|---|
+| `list_test_failures` | none | Run info, stats, global errors, failed/flaky tests with `testId`s |
+| `get_failure_details` | `testId` | Per-attempt errors, locations, snippets, attachment metadata for one test |
+
+Registered in `.mcp.json` as `test-detective` (stdio, `node --experimental-strip-types src/mcp/main.ts`). The README explains the lifecycle, the ID format and the path rules.
+
+- **Layers.** `report.ts` and `paths.ts` hold all Playwright parsing and have no MCP imports. `server.ts` only registers tools and maps results and `ReportError`s to tool results. `main.ts` only wires stdio.
+- **Read-only.** The tools only read `artifacts/results.json` (fixed path) and `stat`/`realpath` attachment paths inside the repo. Never accept file paths from clients, never read attachment contents, never run tests, write files or use the network.
+- **stdout is protocol only.** Log with `console.error`. The stdio test fails on any non-JSON-RPC stdout line.
+- **No diagnosis.** Tools report facts from the report. Root-cause analysis belongs to the Skill or a future agent.
+- **IDs** are `<spec.id>@<report fingerprint>`. An ID from an older report returns `REPORT_CHANGED`. Keep that check if you change the ID format.
+- **TypeScript runs through Node type stripping.** Use erasable syntax only (no `enum`, no parameter properties), `import type` for types, and `.ts` extensions in relative imports. `tsconfig.json` enforces this.
+- **Tests** live in `src/mcp/test/` (`*.test.ts`, node:test) with synthetic fixtures in `src/mcp/test/fixtures/`. Never put `*.test.ts` under `tests/`, because Playwright's `testDir` would pick them up. Tests must not depend on the live demo site.
+- The Skill and Subagent don't use the MCP tools yet. Wiring them up is a separate, explicitly approved step.
 
 ## Planned layout (future stages; do not create yet)
 

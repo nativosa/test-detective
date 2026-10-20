@@ -1,0 +1,52 @@
+{
+  "config": {
+    "configFile": "/home/runner/work/test-detective/test-detective/playwright.config.ts",
+    "rootDir": "/home/runner/work/test-detective/test-detective/tests",
+    "version": "1.64.1",
+    "projects": [{ "id": "chromium", "name": "chromium", "retries": 1 }]
+  },
+  "suites": [
+    {
+      "title": "ui/dropdown.spec.ts",
+      "file": "ui/dropdown.spec.ts",
+      "line": 0,
+      "column": 0,
+      "specs": [
+        {
+          "title": "selects an option",
+          "ok": false,
+          "tags": [],
+          "id": "8888888888aaaaaaaaaa-9999999999aaaaaaaaaa",
+          "file": "ui/dropdown.spec.ts",
+          "line": 3,
+          "column": 5,
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [],
+              "expectedStatus": "passed",
+              "projectId": "chromium",
+              "projectName": "chromium",
+              "status": "unexpected",
+              "results": [
+                {
+                  "status": "failed",
+                  "retry": 0,
+                  "error": { "message": "Error: boom", "location": { "file": "/home/runner/work/test-detective/test-detective/tests/ui/dropdown.spec.ts", "line": 8, "column": 3 } },
+                  "errors": [],
+                  "attachments": [
+                    { "name": "screenshot", "contentType": "image/png", "path": "/home/runner/work/test-detective/test-detective/test-results/ui-dropdown-selects-an-option-chromium/test-failed-1.png" },
+                    { "name": "elsewhere", "contentType": "text/plain", "path": "/tmp/other/file.txt" },
+                    { "name": "windows-on-linux-report", "contentType": "text/plain", "path": "C:\\ci\\repo\\test-results\\x.png" }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": { "startTime": "2026-10-19T16:00:00.000Z", "duration": 1000, "expected": 0, "skipped": 0, "unexpected": 1, "flaky": 0 }
+}
