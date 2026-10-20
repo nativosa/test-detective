@@ -6,7 +6,7 @@
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=22"
+    "node": "^24"
   },
   "scripts": {
     "test": "playwright test",
@@ -16,13 +16,13 @@
     "test:repeat": "playwright test --repeat-each=5",
     "report": "playwright show-report",
     "typecheck": "tsc --noEmit",
-    "test:mcp": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test --test-reporter=spec \"src/mcp/test/*.test.ts\"",
-    "mcp": "node --experimental-strip-types --disable-warning=ExperimentalWarning src/mcp/main.ts"
+    "test:mcp": "node --test --test-reporter=spec \"src/mcp/test/*.test.ts\"",
+    "mcp": "node src/mcp/main.ts"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.3.1",
     "@playwright/test": "^1.64.1",
-    "@types/node": "^22.20.5",
+    "@types/node": "^24.19.2",
     "typescript": "^7.0.2"
   },
   "dependencies": {

@@ -9,7 +9,7 @@ import { makeRepo, snapshotTree } from './helpers.ts';
 
 // Same command .mcp.json uses, so this exercises the real entry point over real stdio.
 const MAIN = fileURLToPath(new URL('../main.ts', import.meta.url));
-const NODE_ARGS = ['--experimental-strip-types', '--disable-warning=ExperimentalWarning', MAIN];
+const NODE_ARGS = [MAIN];
 
 describe('stdio server', () => {
   test('initialize, discover, call and close with the SDK client', async (t) => {

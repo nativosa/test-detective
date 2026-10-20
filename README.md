@@ -17,7 +17,7 @@ The project is also a hands-on way to learn modern AI-assisted software engineer
 
 ## Prerequisites
 
-- Node.js 22 or newer (see `.nvmrc`)
+- Node.js 24 LTS (see `.nvmrc`)
 - npm
 
 ## Setup (Windows, local)
@@ -119,7 +119,7 @@ Limitations:
 
 ### Lifecycle
 
-1. **Server startup.** The client spawns `node --experimental-strip-types src/mcp/main.ts`. Node strips the TypeScript types at load time, so there is no build step. `serveStdio()` binds stdin/stdout. The server logs one line to stderr. **stdout is reserved for JSON-RPC.** A single stray `console.log` would corrupt the stream, and a test checks for this.
+1. **Server startup.** The client spawns `node src/mcp/main.ts`. Node 24 strips the TypeScript types at load time, so there is no build step. `serveStdio()` binds stdin/stdout. The server logs one line to stderr. **stdout is reserved for JSON-RPC.** A single stray `console.log` would corrupt the stream, and a test checks for this.
 2. **Client initialization.** The client sends `initialize` with its protocol version and capabilities. The server answers with its name, version and capabilities (`tools`). The client then sends `notifications/initialized`. `serveStdio` pins one `McpServer` instance from `createServer()` to the connection.
 3. **Tool discovery.** `tools/list` returns each tool's name, title, description, JSON Schema for input and output (generated from the Zod schemas) and annotations (`readOnlyHint`, `openWorldHint: false`…).
 4. **Input validation.** On `tools/call`, the SDK validates arguments against the Zod input schema. Invalid arguments return an `isError` result ("Input validation error…") without running the handler. An unknown tool name is a JSON-RPC protocol error. The handler then validates the `testId` format itself.
@@ -134,12 +134,12 @@ Limitations:
 **MCP Inspector.** For an interactive look at the protocol (downloads the Inspector via `npx`):
 
 ```sh
-npx @modelcontextprotocol/inspector node --experimental-strip-types src/mcp/main.ts
+npx @modelcontextprotocol/inspector node src/mcp/main.ts
 ```
 
 **Automated.** `npm run test:mcp` connects the SDK `Client` to the server in memory and over real stdio.
 
-On Node 22.18 or newer, `--experimental-strip-types` is on by default. The flag stays accepted, so the same command works on 22.12 and later.
+Type stripping is on by default in Node 24, so no `--experimental-strip-types` flag is needed.
 
 ## Project structure
 

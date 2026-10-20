@@ -76,14 +76,14 @@ Subagents live in `.claude/agents/<name>.md`. Run the Skill directly when you wa
 | `list_test_failures` | none | Run info, stats, global errors, failed/flaky tests with `testId`s |
 | `get_failure_details` | `testId` | Per-attempt errors, locations, snippets, attachment metadata for one test |
 
-Registered in `.mcp.json` as `test-detective` (stdio, `node --experimental-strip-types src/mcp/main.ts`). The README explains the lifecycle, the ID format and the path rules.
+Registered in `.mcp.json` as `test-detective` (stdio, `node src/mcp/main.ts`). The README explains the lifecycle, the ID format and the path rules.
 
 - **Layers.** `report.ts` and `paths.ts` hold all Playwright parsing and have no MCP imports. `server.ts` only registers tools and maps results and `ReportError`s to tool results. `main.ts` only wires stdio.
 - **Read-only.** The tools only read `artifacts/results.json` (fixed path) and `stat`/`realpath` attachment paths inside the repo. Never accept file paths from clients, never read attachment contents, never run tests, write files or use the network.
 - **stdout is protocol only.** Log with `console.error`. The stdio test fails on any non-JSON-RPC stdout line.
 - **No diagnosis.** Tools report facts from the report. Root-cause analysis belongs to the Skill or a future agent.
 - **IDs** are `<spec.id>@<report fingerprint>`. An ID from an older report returns `REPORT_CHANGED`. Keep that check if you change the ID format.
-- **TypeScript runs through Node type stripping.** Use erasable syntax only (no `enum`, no parameter properties), `import type` for types, and `.ts` extensions in relative imports. `tsconfig.json` enforces this.
+- **TypeScript runs through Node 24's native type stripping** (no flags). Use erasable syntax only (no `enum`, no parameter properties), `import type` for types, and `.ts` extensions in relative imports. `tsconfig.json` enforces this.
 - **Tests** live in `src/mcp/test/` (`*.test.ts`, node:test) with synthetic fixtures in `src/mcp/test/fixtures/`. Never put `*.test.ts` under `tests/`, because Playwright's `testDir` would pick them up. Tests must not depend on the live demo site.
 - The Skill and Subagent don't use the MCP tools yet. Wiring them up is a separate, explicitly approved step.
 

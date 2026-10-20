@@ -3,7 +3,7 @@
     "test-detective": {
       "type": "stdio",
       "command": "node",
-      "args": ["--experimental-strip-types", "--disable-warning=ExperimentalWarning", "src/mcp/main.ts"]
+      "args": ["src/mcp/main.ts"]
     }
   }
 }
