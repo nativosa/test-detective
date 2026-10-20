@@ -6,7 +6,7 @@ Conventions for working on test-detective, for both human contributors and Claud
 
 An AI-assisted tool that investigates failed Playwright tests. A parallel goal is learning Claude Code features (Skills, Subagents, Hooks, MCP, Agent SDK) by using them deliberately. Favor explaining and teaching over silently delegating.
 
-## Current stage: 2.3 (local MCP server)
+## Current stage: 2.3.1 (Skill and Subagent use the MCP server)
 
 In scope: the Playwright suite, its config and reporting, the `investigate-failure` Skill, the `failure-investigator` Subagent, the read-only MCP server in `src/mcp/`, and docs.
 
@@ -53,7 +53,7 @@ Local runs use no retries, so flaky failures surface instead of being hidden. CI
 
 | Skill | Invocation | Purpose |
 |---|---|---|
-| `investigate-failure` | `/investigate-failure [test title or spec]` | Read-only root-cause report for failed tests, built from the artifact contract above |
+| `investigate-failure` | `/investigate-failure [test title or spec]` | Read-only root-cause report for failed tests, built from the MCP tools and the artifact contract above |
 
 Skills live in `.claude/skills/<name>/SKILL.md`. `investigate-failure` must stay read-only: it never edits files, reruns tests, or contacts external services. If you change the artifact contract, update the Skill too.
 
@@ -67,7 +67,7 @@ When classifying, the Skill treats an HTTP error the test mocked itself (`page.r
 
 Subagents live in `.claude/agents/<name>.md`. Run the Skill directly when you want a quick inline look. Delegate to the subagent when you want to keep raw artifacts out of the main context.
 
-`failure-investigator` preloads the Skill through `skills:`. Don't copy the Skill's procedure into the agent file; edit the Skill instead. The agent is meant to stay read-only. Its tool allowlist (`Read, Grep, Glob, Bash`) and `permissionMode: dontAsk` reduce risk, but they aren't a hard security boundary. Bash can still write files, and if the parent session is in `acceptEdits`, `auto` or `bypassPermissions`, the parent's mode overrides `dontAsk`. Delegate from Default (manual approval) mode.
+`failure-investigator` preloads the Skill through `skills:`. Don't copy the Skill's procedure into the agent file; edit the Skill instead. The agent is meant to stay read-only. Its tool allowlist (`Read, Grep, Glob, Bash` plus the two read-only test-detective MCP tools) and `permissionMode: dontAsk` reduce risk, but they aren't a hard security boundary. Bash can still write files, and if the parent session is in `acceptEdits`, `auto` or `bypassPermissions`, the parent's mode overrides `dontAsk`. Delegate from Default (manual approval) mode.
 
 ## MCP server
 
@@ -85,7 +85,7 @@ Registered in `.mcp.json` as `test-detective` (stdio, `node src/mcp/main.ts`). T
 - **IDs** are `<spec.id>@<report fingerprint>`. An ID from an older report returns `REPORT_CHANGED`. Keep that check if you change the ID format.
 - **TypeScript runs through Node 24's native type stripping** (no flags). Use erasable syntax only (no `enum`, no parameter properties), `import type` for types, and `.ts` extensions in relative imports. `tsconfig.json` enforces this.
 - **Tests** live in `src/mcp/test/` (`*.test.ts`, node:test) with synthetic fixtures in `src/mcp/test/fixtures/`. Never put `*.test.ts` under `tests/`, because Playwright's `testDir` would pick them up. Tests must not depend on the live demo site.
-- The Skill and Subagent don't use the MCP tools yet. Wiring them up is a separate, explicitly approved step.
+- **Consumers.** The `investigate-failure` Skill gets failure data only from these two tools (never by parsing `results.json`) and reads source, screenshots, error-context and traces directly. If the server is unavailable it reports that and stops; there is no JSON fallback. `failure-investigator` lists both tools by exact name (`mcp__test-detective__list_test_failures`, `mcp__test-detective__get_failure_details`) in `tools:`, because an explicit allowlist does not inherit MCP tools. Listing a tool there makes it available but doesn't approve it, and the Skill's `allowed-tools` doesn't carry into a preloaded `dontAsk` subagent (verified: the call was denied). The project `.claude/settings.json` therefore allows exactly these two tools. If you rename the server key in `.mcp.json` or a tool in `server.ts`, update the agent, the Skill and `.claude/settings.json`.
 
 ## Planned layout (future stages; do not create yet)
 

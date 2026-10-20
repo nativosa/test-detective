@@ -6,12 +6,12 @@ The project is also a hands-on way to learn modern AI-assisted software engineer
 
 ## Status
 
-**Stage 2.3: local MCP server.** A small, reliable TypeScript Playwright suite against [the-internet.herokuapp.com](https://the-internet.herokuapp.com/) produces rich failure artifacts. The `investigate-failure` Skill and `failure-investigator` Subagent read them, and a read-only [MCP server](#mcp-server) exposes them as structured tools.
+**Stage 2.3.1: Skill and Subagent on MCP.** A small, reliable TypeScript Playwright suite against [the-internet.herokuapp.com](https://the-internet.herokuapp.com/) produces rich failure artifacts. A read-only [MCP server](#mcp-server) exposes them as structured tools. The `investigate-failure` Skill and `failure-investigator` Subagent use those tools for failure data, and read source, screenshots, error-context and traces directly.
 
 ## Roadmap
 
 1. **Foundation** (done): Playwright suite, reporting, traces, screenshots, conventions.
-2. **Investigation agent** (current): read failure artifacts and propose likely root causes. Skill (2.1), Subagent (2.2) and MCP server (2.3) are in place.
+2. **Investigation agent** (current): read failure artifacts and propose likely root causes. Skill (2.1), Subagent (2.2), MCP server (2.3) and their integration (2.3.1) are in place.
 3. **Fix suggestions**: propose concrete code changes.
 4. **Validation**: apply a fix and re-run to confirm it.
 
