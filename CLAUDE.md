@@ -6,11 +6,11 @@ Conventions for working on test-detective, for both human contributors and Claud
 
 An AI-assisted tool that investigates failed Playwright tests. A parallel goal is learning Claude Code features (Skills, Subagents, Hooks, MCP, Agent SDK) by using them deliberately. Favor explaining and teaching over silently delegating.
 
-## Current stage: 2.3.1 (Skill and Subagent use the MCP server)
+## Current stage: 2.4 (standalone investigation CLI on the Agent SDK)
 
-In scope: the Playwright suite, its config and reporting, the `investigate-failure` Skill, the `failure-investigator` Subagent, the read-only MCP server in `src/mcp/`, and docs.
+In scope: the Playwright suite, its config and reporting, the `investigate-failure` Skill, the `failure-investigator` Subagent, the read-only MCP server in `src/mcp/`, the read-only Agent SDK CLI in `src/agent/`, and docs.
 
-**Do not build yet:** an autonomous AI agent (Agent SDK), Hooks, a dashboard, HTTP MCP transport, CI/cloud infrastructure. Propose these, but don't implement them without explicit approval.
+**Do not build yet:** auto-fixing or applying changes, running tests from an agent, Hooks, a dashboard, an HTTP API or HTTP MCP transport, multiple agents or parallel investigation, CI/cloud infrastructure. Propose these, but don't implement them without explicit approval.
 
 ## Commands
 
@@ -19,11 +19,13 @@ npm run typecheck     # tsc --noEmit
 npm test              # full Playwright suite (needs network)
 npm run test:mcp      # MCP server unit + protocol tests (node:test, offline)
 npm run mcp           # start the MCP server on stdio
+npm run test:agent    # Agent SDK CLI tests (node:test, offline, no model requests)
+npm run investigate   # live investigation via the Agent SDK (uses the Claude account; ask first)
 npm run test:repeat   # initial stability check (--repeat-each=5)
 npm run report        # open HTML report
 ```
 
-Before declaring a change done, run `npm run typecheck` plus the relevant tests (`npm test` for the UI suite, `npm run test:mcp` for `src/mcp/`) and report the results honestly.
+Before declaring a change done, run `npm run typecheck` plus the relevant tests (`npm test` for the UI suite, `npm run test:mcp` for `src/mcp/`, `npm run test:agent` for `src/agent/`) and report the results honestly. Never run `npm run investigate` without the user's approval: it makes real model requests on their account.
 
 ## Test conventions
 
@@ -81,17 +83,24 @@ Registered in `.mcp.json` as `test-detective` (stdio, `node src/mcp/main.ts`). T
 - **Layers.** `report.ts` and `paths.ts` hold all Playwright parsing and have no MCP imports. `server.ts` only registers tools and maps results and `ReportError`s to tool results. `main.ts` only wires stdio.
 - **Read-only.** The tools only read `artifacts/results.json` (fixed path) and `stat`/`realpath` attachment paths inside the repo. Never accept file paths from clients, never read attachment contents, never run tests, write files or use the network.
 - **stdout is protocol only.** Log with `console.error`. The stdio test fails on any non-JSON-RPC stdout line.
-- **No diagnosis.** Tools report facts from the report. Root-cause analysis belongs to the Skill or a future agent.
+- **No diagnosis.** Tools report facts from the report. Root-cause analysis belongs to the Skill (and the agents that run it).
 - **IDs** are `<spec.id>@<report fingerprint>`. An ID from an older report returns `REPORT_CHANGED`. Keep that check if you change the ID format.
 - **TypeScript runs through Node 24's native type stripping** (no flags). Use erasable syntax only (no `enum`, no parameter properties), `import type` for types, and `.ts` extensions in relative imports. `tsconfig.json` enforces this.
 - **Tests** live in `src/mcp/test/` (`*.test.ts`, node:test) with synthetic fixtures in `src/mcp/test/fixtures/`. Never put `*.test.ts` under `tests/`, because Playwright's `testDir` would pick them up. Tests must not depend on the live demo site.
-- **Consumers.** The `investigate-failure` Skill gets failure data only from these two tools (never by parsing `results.json`) and reads source, screenshots, error-context and traces directly. If the server is unavailable it reports that and stops; there is no JSON fallback. `failure-investigator` lists both tools by exact name (`mcp__test-detective__list_test_failures`, `mcp__test-detective__get_failure_details`) in `tools:`, because an explicit allowlist does not inherit MCP tools. Listing a tool there makes it available but doesn't approve it, and the Skill's `allowed-tools` doesn't carry into a preloaded `dontAsk` subagent (verified: the call was denied). The project `.claude/settings.json` therefore allows exactly these two tools. If you rename the server key in `.mcp.json` or a tool in `server.ts`, update the agent, the Skill and `.claude/settings.json`.
+- **Consumers.** The `investigate-failure` Skill gets failure data only from these two tools (never by parsing `results.json`) and reads source, screenshots, error-context and traces directly. If the server is unavailable it reports that and stops; there is no JSON fallback. `failure-investigator` lists both tools by exact name (`mcp__test-detective__list_test_failures`, `mcp__test-detective__get_failure_details`) in `tools:`, because an explicit allowlist does not inherit MCP tools. Listing a tool there makes it available but doesn't approve it, and the Skill's `allowed-tools` doesn't carry into a preloaded `dontAsk` subagent (verified: the call was denied). The project `.claude/settings.json` therefore allows exactly these two tools. The Agent SDK CLI (`src/agent/config.ts`) uses the same two tool names and parses their output with the schemas exported from `report.ts`. If you rename the server key in `.mcp.json` or a tool in `server.ts`, update the agent, the Skill, `.claude/settings.json` and `src/agent/config.ts`. If you change an output schema, run `npm run test:agent` too.
 
-## Planned layout (future stages; do not create yet)
+## Agent SDK CLI
 
-```
-src/agent/   investigation agent (reads the artifact contract above)
-```
+`npm run investigate [-- --test <filter>]` runs one `@anthropic-ai/claude-agent-sdk` session (version pinned exactly; SDK `0.3.N` bundles Claude Code `2.1.N`). It invokes the `investigate-failure` Skill and uses the `test-detective` MCP server. The README covers usage, auth and exit codes.
+
+- **Layers.** `args.ts` (CLI parsing), `auth.ts` (auth checks), `config.ts` (pure: builds SDK `Options`), `result.ts` (Zod types and Markdown) and `run.ts` (consumes the SDK stream) have no side effects on import. `main.ts` only wires argv, Ctrl+C, the `git status` check and the exit code. `run.ts` takes `query` as a parameter. That parameter is the only test seam, so don't add adapter classes.
+- **Reuse, don't copy.** The investigation procedure lives in the Skill. The `systemPrompt.append` in `config.ts` only maps the Skill's report onto the structured output. The CLI reuses the MCP output schemas from `src/mcp/report.ts` to parse observed tool results.
+- **Observed facts vs model output.** Test facts (title, file:line, project, outcome, attempts, fingerprint) come from MCP tool results observed in the stream, never from the model. Keep the consistency checks in `run.ts`. A report without the observed Skill call, `list_test_failures` result and per-testId `get_failure_details` result is `unverified`.
+- **Permission surface.** `config.ts` keeps `tools`, `allowedTools` (exact names and the Skill's Bash patterns), `disallowedTools`, deny rules (in `settings.permissions.deny`, because Bash specifiers in `disallowedTools` may remove the whole tool), `permissionMode: 'dontAsk'`, `settingSources: ['project']`, `strictMcpConfig`, `autoMemoryEnabled: false`, `disableSkillShellExecution` and `persistSession: false`. `config.test.ts` asserts all of them. Widening any of them needs approval. None of this is an OS sandbox. `tools` must include `Skill`: the `skills` option only adds the `Skill(investigate-failure)` allow rule and filters the listing, and `init.skills` means "discovered", not "invocable". `process.test.ts` pins the SDK's flag translation. Don't add a bare `Skill` to `allowedTools`.
+- **Auth fails closed, in three checks.** (1) Env var names before the SDK starts. (2) `initializationResult().account` before the prompt is sent. SDK 0.3.302 omits `apiKeySource` there, so subscription mode accepts its absence only with `apiProvider: firstParty`, an eligible `subscriptionType`, and a clean env; a reported `apiKeySource` is still checked strictly. (3) The stream's init `apiKeySource` must match the mode, or the session is aborted. Check 3 runs after the prompt is sent, so never describe it as preventing billing. Never print credential values, email or organization. Never switch silently to API billing. Label `total_cost_usd` as an estimate.
+- **Subprocess env.** `subprocessEnv()` removes only the inherited Claude Code session variables listed in `INHERITED_SESSION_VARS` (session identity, messaging socket/token, entrypoint). Don't strip by prefix: `CLAUDE_CODE_*` configuration variables must pass through. Auth variables are refused by the preflight, never hidden.
+- **Cancellation.** Timeouts and Ctrl+C abort the controller and call `close()`. With SDK 0.3.302, `close()` ends the child's stdin, then sends SIGKILL after about 7 s. `process.test.ts` checks that the child process really exits.
+- **Tests** live in `src/agent/test/` (node:test). They use fake SDK streams (`helpers.ts`) and a fake Claude Code process, and must never make model requests or need credentials.
 
 ## Workflow rules
 

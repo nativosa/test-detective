@@ -17,7 +17,9 @@
     "report": "playwright show-report",
     "typecheck": "tsc --noEmit",
     "test:mcp": "node --test --test-reporter=spec \"src/mcp/test/*.test.ts\"",
-    "mcp": "node src/mcp/main.ts"
+    "mcp": "node src/mcp/main.ts",
+    "test:agent": "node --test --test-reporter=spec \"src/agent/test/*.test.ts\"",
+    "investigate": "node src/agent/main.ts"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.3.1",
@@ -26,6 +28,7 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.302",
     "@modelcontextprotocol/server": "^2.3.1",
     "zod": "^4.6.7"
   }
