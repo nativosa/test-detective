@@ -1,0 +1,11 @@
+{
+  "id": "S04",
+  "spec": "tests/ui/profile.spec.ts",
+  "app": { "profileApi": "error" },
+  "playwright": { "retries": 0, "testTimeoutMs": 15000 },
+  "expectObservation": {
+    "outcome": "unexpected",
+    "errorPattern": "toBeVisible",
+    "attachments": ["trace", "screenshot", "error-context"]
+  }
+}

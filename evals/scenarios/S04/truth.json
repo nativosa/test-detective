@@ -1,0 +1,43 @@
+{
+  "id": "S04",
+  "canary": "TDCANARY-6a21ab91-6db4-4959-87b7-97409e477596",
+  "description": "The app's /api/profile endpoint really returns HTTP 500, so the profile page shows an error alert instead of the user's name. The test is correct and did not mock anything.",
+  "failureType": "application_failure",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [{ "title": "shows the signed-in user on the profile page", "file": "tests/ui/profile.spec.ts" }],
+    "classification": "Application defect",
+    "acceptableAlternatives": [],
+    "sourceMismatch": false,
+    "confidence": ["High", "Medium"]
+  },
+  "rootCause": {
+    "summary": "GET /api/profile responded 500 from the real server; the page rendered its error alert and never showed 'Dana Demo'.",
+    "criteria": [
+      { "id": "server-error", "description": "Identifies the HTTP 500 / server error", "anyOf": ["\\b500\\b", "internal server error", "server error"] },
+      { "id": "profile-api", "description": "Points at the profile API request", "anyOf": ["/api/profile", "profile (api|endpoint|request)"] },
+      { "id": "error-shown", "description": "Connects it to the error state the page shows", "anyOf": ["something went wrong", "error (alert|message|banner|state)", "role=\"?alert"] }
+    ],
+    "forbiddenClaims": [
+      { "id": "blames-locator", "description": "Blames the test's locators or expected text", "pattern": "(locator|selector) (is )?(wrong|incorrect)|wrong (expected )?text" },
+      { "id": "claims-mock", "description": "Claims the test mocked the response", "pattern": "the test (mocks|mocked|stubs|stubbed|fulfills|fulfilled)" }
+    ]
+  },
+  "requiredEvidence": [
+    { "kind": "mcp", "refPattern": "get_failure_details", "why": "Failure data must come from the MCP tools", "provisional": false },
+    { "kind": "source", "refPattern": "^tests/ui/profile\\.spec\\.ts$", "why": "Shows the test sets up no route mocking", "provisional": false },
+    { "kind": "error_context", "refPattern": "^test-results/.+/error-context\\.md$", "why": "The page snapshot shows the error alert", "provisional": false },
+    { "kind": "trace", "refPattern": "^test-results/.+/trace\\.zip$", "why": "Confirmed (Playwright 1.64.1): the .network resource-snapshot for /api/profile has status 500 and no _wasFulfilled field, with real server headers (Date, Connection); test.trace has no Route/Fulfill steps", "provisional": false }
+  ],
+  "recommendations": {
+    "acceptable": [
+      { "id": "fix-backend", "description": "Fix or investigate the profile endpoint / server", "anyOf": ["(fix|investigate|debug|check) .{0,40}(server|backend|api|endpoint)", "server(-side)? logs"] },
+      { "id": "keep-test", "description": "States the test itself needs no change", "anyOf": ["no (change|fix) (is )?(needed|required) (to|in) the test", "test (is|looks) correct"] }
+    ],
+    "forbidden": [
+      { "id": "mock-it", "description": "Mocks the API so the test passes", "pattern": "page\\.route|route\\.fulfill|mock (the )?(api|endpoint|response)" },
+      { "id": "sleep", "description": "Adds a fixed wait", "pattern": "waitForTimeout|\\bsleep\\b" },
+      { "id": "retries", "description": "Hides the failure with retries", "pattern": "add (a )?retr(y|ies)" }
+    ]
+  }
+}

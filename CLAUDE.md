@@ -6,9 +6,11 @@ Conventions for working on test-detective, for both human contributors and Claud
 
 An AI-assisted tool that investigates failed Playwright tests. A parallel goal is learning Claude Code features (Skills, Subagents, Hooks, MCP, Agent SDK) by using them deliberately. Favor explaining and teaching over silently delegating.
 
-## Current stage: 2.4 (standalone investigation CLI on the Agent SDK)
+## Current stage: Stage 2.5 complete (agent evaluation framework and three-scenario pilot benchmark)
 
-In scope: the Playwright suite, its config and reporting, the `investigate-failure` Skill, the `failure-investigator` Subagent, the read-only MCP server in `src/mcp/`, the read-only Agent SDK CLI in `src/agent/`, and docs.
+The next stage hasn't been chosen yet. Propose it before building anything new.
+
+In scope: the Playwright suite, its config and reporting, the `investigate-failure` Skill, the `failure-investigator` Subagent, the read-only MCP server in `src/mcp/`, the read-only Agent SDK CLI in `src/agent/`, the evaluation dataset in `evals/` and `src/eval/`, and docs.
 
 **Do not build yet:** auto-fixing or applying changes, running tests from an agent, Hooks, a dashboard, an HTTP API or HTTP MCP transport, multiple agents or parallel investigation, CI/cloud infrastructure. Propose these, but don't implement them without explicit approval.
 
@@ -21,11 +23,20 @@ npm run test:mcp      # MCP server unit + protocol tests (node:test, offline)
 npm run mcp           # start the MCP server on stdio
 npm run test:agent    # Agent SDK CLI tests (node:test, offline, no model requests)
 npm run investigate   # live investigation via the Agent SDK (uses the Claude account; ask first)
+npm run test:eval     # evaluation dataset, generator, snapshot, isolation, scoring and report tests (node:test, offline)
+npm run eval -- generate --scenario <id>  # Playwright snapshot of one scenario (local app, no model); never overwrites
+npm run eval -- score --run <dir>         # score a saved run offline (no model, no Playwright); refuses to change stored scores without --rescore
+npm run eval -- report --run <dir>        # summary.json + summary.md from the score files (and review.json)
+npm run eval -- report --run <a> --run <b> --out <dir>  # one combined summary over several runs; source runs are only read
+npm run eval -- live --scenario <id> --max-budget-usd <n>  # ONE live session (real model requests; ask first)
 npm run test:repeat   # initial stability check (--repeat-each=5)
 npm run report        # open HTML report
+npx playwright test --list --reporter=list  # discovery check; see the note below
 ```
 
-Before declaring a change done, run `npm run typecheck` plus the relevant tests (`npm test` for the UI suite, `npm run test:mcp` for `src/mcp/`, `npm run test:agent` for `src/agent/`) and report the results honestly. Never run `npm run investigate` without the user's approval: it makes real model requests on their account.
+**Artifact safety:** plain `npx playwright test --list` still runs the configured reporters, so the JSON reporter overwrites `artifacts/results.json` with an all-skipped listing. That destroys the last real report, which the MCP server and the Skill read. For discovery checks, always pass `--reporter=list`: it replaces the configured reporters and writes no files (verified with Playwright 1.64.1). Any Playwright run outside `npm test` must also pin `outputDir`/`--output`, because the default output directory is the repo-root `test-results/`, which Playwright empties at the start of every run.
+
+Before declaring a change done, run `npm run typecheck` plus the relevant tests (`npm test` for the UI suite, `npm run test:mcp` for `src/mcp/`, `npm run test:agent` for `src/agent/`, `npm run test:eval` for `src/eval/` and `evals/`) and report the results honestly. Never run `npm run investigate` without the user's approval: it makes real model requests on their account.
 
 ## Test conventions
 
@@ -101,6 +112,27 @@ Registered in `.mcp.json` as `test-detective` (stdio, `node src/mcp/main.ts`). T
 - **Subprocess env.** `subprocessEnv()` removes only the inherited Claude Code session variables listed in `INHERITED_SESSION_VARS` (session identity, messaging socket/token, entrypoint). Don't strip by prefix: `CLAUDE_CODE_*` configuration variables must pass through. Auth variables are refused by the preflight, never hidden.
 - **Cancellation.** Timeouts and Ctrl+C abort the controller and call `close()`. With SDK 0.3.302, `close()` ends the child's stdin, then sends SIGKILL after about 7 s. `process.test.ts` checks that the child process really exits.
 - **Tests** live in `src/agent/test/` (node:test). They use fake SDK streams (`helpers.ts`) and a fake Claude Code process, and must never make model requests or need credentials.
+
+## Evaluation (Stage 2.5)
+
+`evals/README.md` covers the dataset layout and methodology. Stage 2.5 is complete. It includes schemas, the fixture app, three pilot scenarios (S02, S04, S05), snapshot generation and storage (`generate.ts`, `snapshots.ts`), workspaces and isolation (`workspace.ts`, `isolation.ts`), offline scoring and reporting of saved runs, including a combined report over several runs (`runs.ts`, `score.ts`, `report.ts`), and the live adapter (`live.ts`). Every further live run still needs approval.
+
+**Pilot benchmark (2.5.3, scorer v5).** One live run per scenario, combined with `report --run … --out`. Results: 3/3 exact classifications (two test-code defects, one application defect, all at High confidence), 3/3 fully accepted diagnoses, every check passed, no audit violations or suspicious findings. Total about 118 s, 32 turns and an estimated $0.52 at SDK list prices (not a charge). S04 and S05 fail identically (same alert, same HTTP 500). The agent separated them by the spec source (`page.route`/`route.fulfill`) and the trace's `_wasFulfilled` marker, not by the status code. **Three single-run scenarios do not establish statistical reliability:** each result shows what one session did, not a success rate. Don't quote these numbers as accuracy, and don't tune the Skill or the ground truth to them. The saved runs live in `evals/runs/` (gitignored). Their history is part of the record and must not be edited: S02's workspace cleanup failed (EBUSY; infrastructure only), and S04 has three dismissed `conditional-expansion` findings from a Bash call that was denied.
+
+- **Generation vs ground truth.** `generation.json` (read by the generator through `src/eval/generation.ts`) never contains answers. `truth.json` (`src/eval/truth.ts`) is for scoring only. `generation.ts` must not import `truth.ts`. `separation.test.ts` enforces this.
+- **No leaks into what the agent sees.** Scenario specs have neutral names and titles, no comments, and never mention classifications, scenario IDs or canaries. Never repeat expected answers outside `truth.json`.
+- **Workspaces.** Evaluation sessions run in `<tmpdir>/ws-XXXXXX/project` and contain only the snapshot payload, `SKILL.md` and `.claude/settings.json`. Production code is reused unchanged: `runInvestigation(repoRoot = workspace)` with `evalQuery` wrapping the SDK query. `adaptOptions` may only repoint the MCP server's root (`TEST_DETECTIVE_REPO_ROOT`) and append Read deny rules. Every other option must equal `buildQueryOptions` output, and `describeDifferences` records the delta for run metadata. Never widen tools or permissions here.
+- **Leakage controls are mitigations, not a sandbox.** Workspace separation, canaries and transcript audits reduce and detect leaks but can't guarantee isolation. Describe them that way.
+- **Heuristic scoring.** Regex criteria are signals. Uncertain matches go to manual review. No LLM judge.
+- **Scoring is offline and pure.** `score.ts` and `report.ts` do no I/O; `runs.ts` reads saved files only. Scoring never imports the SDK at runtime, `agent/run.ts`, the generator or `child_process` (`separation.test.ts`). Facts, tool use and evidence provenance come from the raw transcript and the verified snapshot, never from the model's claims; provenance is graded (verified, unresolved -> review, unsupported or confirmed false -> fail), and a missing Read alone is never called fabrication. Classification verdicts (exact, acceptable alternative, incorrect, abstained, missing; per test, no partial credit) are reported separately from full acceptance (every check passed, reviews resolved). Only confirmed violations (canary seen, successful protected-path access, workspace changed) invalidate a run; ambiguous paths go to review. Scores record the truth hash; `score` refuses to replace a stored score that would change unless `--rescore`, which archives the old one. Reviews (`review.json`) never modify `score.json`. Golden fixtures are scorer-validation data (`source: scorer_validation`), never agent-performance measurements. The saved-run format, categories, checks and review schema are documented in `evals/README.md`; keep it in sync.
+- **Baseline parity.** The baseline is normal `npm run investigate` behavior. Record every eval-specific configuration difference in run metadata and test it.
+- **Generation never touches the root artifacts.** Stages live in `.work/<random>/`, and Playwright's `outputDir` is pinned to the stage in both the config and `--output`, because the default resolves to the repo root and is emptied on every run. The generator discards a snapshot if the root `artifacts/results.json`, `test-results/`, `playwright-report/` or `git status` changed. Snapshots are write-once and hash-verified on load. `.work/`, `evals/snapshots/` and `evals/runs/` are gitignored.
+- **Scenario specs stay outside `testDir`**, so `npm test` never runs intentional failures. `*.test.ts` files go in `src/eval/test/`, never under `tests/`.
+- Live evaluation (model requests) needs explicit approval per run. Never run a whole benchmark automatically, and never retry model requests. Never run `npm run eval -- live` without the user's approval; tests inject `query` and must never reach the real SDK (CLI tests may only use refused arguments).
+- **Live adapter.** `live.ts` is the only eval module that loads the SDK at runtime (`separation.test.ts`). It runs exactly one scenario and one `runInvestigation` per invocation, requires `--max-budget-usd` (capped at 2), captures the truth, snapshot, Skill and settings hashes before the session, appends the transcript as it streams, always removes the workspace, and saves failed and interrupted runs too. A run with an injected query is labelled `scorer_validation`, never `live`.
+- **Workspace cleanup is bounded.** SDK `close()` doesn't wait for the CLI and its MCP server (both with cwd = workspace) to exit, so on Windows an immediate removal fails with EBUSY. `removeWorkspace` retries only lock errors until `REMOVAL_DEADLINE_MS` (above the SDK's ~7 s SIGKILL path) and records every retried attempt in `outcome.json`. A workspace still busy at the deadline is a leak and is reported as a cleanup failure. Never raise the deadline or widen the retried codes to make that go away. Cleanup is infrastructure: it is shown in the score and report but never changes the category.
+- **Shell variables in the audit.** `$NAME` is resolved only for a narrow literal `NAME=value` assignment in the same command (`shellAssignments`), and the value then gets every path check. Everything else stays `unresolved-path`. An assignment after `&&` adds a `conditional-expansion` warning. That warning, and only that one, is dismissed (kept visible in `audit.dismissed`) when the result's `permission_denials` and an error result both show the call never ran. Never classify shell variables as safe in general.
+- **`StructuredOutput` is expected, not allowed.** It is the SDK's tool for `outputFormat`. The audit records it under `audit.expected` only when the session recorded an output schema, the init message announced the tool, and the call is top-level. It is not added to any tool or permission list.
 
 ## Workflow rules
 

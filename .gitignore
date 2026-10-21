@@ -18,3 +18,11 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 .idea/
+
+# Evaluation (Stage 2.5): staging, snapshots and run outputs are generated
+.work/
+evals/snapshots/
+evals/runs/
+
+# Claude Code local settings (per developer, may hold personal permissions)
+.claude/settings.local.json

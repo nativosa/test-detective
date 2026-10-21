@@ -19,7 +19,9 @@
     "test:mcp": "node --test --test-reporter=spec \"src/mcp/test/*.test.ts\"",
     "mcp": "node src/mcp/main.ts",
     "test:agent": "node --test --test-reporter=spec \"src/agent/test/*.test.ts\"",
-    "investigate": "node src/agent/main.ts"
+    "investigate": "node src/agent/main.ts",
+    "eval": "node src/eval/main.ts",
+    "test:eval": "node --test --test-reporter=spec \"src/eval/test/*.test.ts\""
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.3.1",

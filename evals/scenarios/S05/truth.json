@@ -1,0 +1,40 @@
+{
+  "id": "S05",
+  "canary": "TDCANARY-eac98003-4908-4d56-8a1c-92e6788ec40b",
+  "description": "The test itself routes /api/profile to a 500 response with page.route + route.fulfill, then expects the profile to render. The real API works; the test contradicts itself.",
+  "failureType": "mocked_failure",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [{ "title": "shows the signed-in user on the profile page", "file": "tests/ui/profile.spec.ts" }],
+    "classification": "Test-code defect",
+    "acceptableAlternatives": [],
+    "sourceMismatch": false,
+    "confidence": ["High", "Medium"]
+  },
+  "rootCause": {
+    "summary": "The test's own route.fulfill returns 500 for /api/profile, so the page shows its error alert and 'Dana Demo' never appears.",
+    "criteria": [
+      { "id": "test-mock", "description": "Identifies the test's own route mocking", "anyOf": ["page\\.route", "route\\.fulfill", "mock(ed|s|ing)?\\b", "stub(bed|s)?\\b", "intercept(ed|s)?\\b"] },
+      { "id": "server-error", "description": "Identifies the mocked HTTP 500", "anyOf": ["\\b500\\b", "internal server error", "server error"] }
+    ],
+    "forbiddenClaims": [
+      { "id": "blames-backend", "description": "Claims the real backend is broken", "pattern": "(backend|server|api) (is )?(down|broken|failing)|(real|actual) (server|backend|api) (returned|responded)" }
+    ]
+  },
+  "requiredEvidence": [
+    { "kind": "mcp", "refPattern": "get_failure_details", "why": "Failure data must come from the MCP tools", "provisional": false },
+    { "kind": "source", "refPattern": "^tests/ui/profile\\.spec\\.ts$", "why": "The spec contains page.route + route.fulfill with status 500", "provisional": false },
+    { "kind": "trace", "refPattern": "^test-results/.+/trace\\.zip$", "why": "Confirmed (Playwright 1.64.1): the .network resource-snapshot for /api/profile has status 500 and \"_wasFulfilled\": true; test.trace has \"Route requests\" and \"Fulfill request\" steps", "provisional": false }
+  ],
+  "recommendations": {
+    "acceptable": [
+      { "id": "remove-mock", "description": "Remove the route mock", "anyOf": ["(remove|delete|drop) .{0,40}(route|mock|stub|fulfill)"] },
+      { "id": "mock-success", "description": "Fulfill the mock with a 200 and a profile body", "anyOf": ["status: ?200", "fulfill .{0,40}\\b200\\b"] },
+      { "id": "expect-error", "description": "Turn it into an error-state test that expects the alert", "anyOf": ["expect .{0,60}(alert|error (message|state))", "assert .{0,60}(alert|error (message|state))"] }
+    ],
+    "forbidden": [
+      { "id": "fix-backend", "description": "Asks for a backend fix", "pattern": "fix (the )?(backend|server|api endpoint)" },
+      { "id": "sleep", "description": "Adds a fixed wait", "pattern": "waitForTimeout|\\bsleep\\b" }
+    ]
+  }
+}

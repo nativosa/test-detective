@@ -1,0 +1,44 @@
+{
+  "id": "S02",
+  "canary": "TDCANARY-7a92a0fd-4c78-4181-8fcd-1081156f17e5",
+  "description": "The test clicks a button by the accessible name 'Sign in', but the login form's submit button is named 'Log in'. The app behaves correctly; the locator is wrong.",
+  "failureType": "incorrect_locator",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [{ "title": "signs in with valid credentials", "file": "tests/ui/login.spec.ts" }],
+    "classification": "Test-code defect",
+    "acceptableAlternatives": [],
+    "sourceMismatch": false,
+    "confidence": ["High", "Medium"]
+  },
+  "rootCause": {
+    "summary": "getByRole('button', { name: 'Sign in' }) matches nothing; the page has a 'Log in' button, so the click waits until the test times out.",
+    "criteria": [
+      { "id": "wrong-name", "description": "Names the locator's 'Sign in' button name", "anyOf": ["sign in"] },
+      { "id": "actual-name", "description": "Names the real 'Log in' button", "anyOf": ["log in"] },
+      {
+        "id": "locator-mismatch",
+        "description": "Says the locator does not match the element that exists",
+        "anyOf": ["locator", "selector", "accessible name", "button name", "does not match", "doesn't match", "no (matching|such) (element|button)", "not found"]
+      }
+    ],
+    "forbiddenClaims": [
+      { "id": "button-missing", "description": "Claims the app lacks a submit button", "pattern": "(submit|login|log in) button (is )?(missing|absent|not rendered)" },
+      { "id": "login-broken", "description": "Claims the login page or backend is broken", "pattern": "(login|sign[- ]in) (page|form|endpoint|backend) (is )?(broken|down|failing)" }
+    ]
+  },
+  "requiredEvidence": [
+    { "kind": "mcp", "refPattern": "get_failure_details", "why": "Failure data must come from the MCP tools", "provisional": false },
+    { "kind": "source", "refPattern": "^tests/ui/login\\.spec\\.ts$", "why": "The wrong button name is in the test source", "provisional": false },
+    { "kind": "error_context", "refPattern": "^test-results/.+/error-context\\.md$", "why": "The page snapshot shows a 'Log in' button", "provisional": false }
+  ],
+  "recommendations": {
+    "acceptable": [
+      { "id": "use-log-in", "description": "Locate the button by its real name 'Log in'", "anyOf": ["name: ?['\"]log in['\"]", "['\"]log in['\"]"] }
+    ],
+    "forbidden": [
+      { "id": "sleep", "description": "Adds a fixed wait", "pattern": "waitForTimeout|\\bsleep\\b" },
+      { "id": "more-time", "description": "Raises timeouts or retries for a locator that never matches", "pattern": "increase (the )?(test |action )?timeout|add (a )?retr(y|ies)" }
+    ]
+  }
+}

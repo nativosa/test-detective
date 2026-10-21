@@ -1,0 +1,11 @@
+{
+  "id": "S02",
+  "spec": "tests/ui/login.spec.ts",
+  "app": { "profileApi": "ok" },
+  "playwright": { "retries": 0, "testTimeoutMs": 15000 },
+  "expectObservation": {
+    "outcome": "unexpected",
+    "errorPattern": "Sign in",
+    "attachments": ["trace", "screenshot", "error-context"]
+  }
+}
