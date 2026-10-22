@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { TestContext } from 'node:test';
-import { startApp, USER } from '../../../evals/app/server.ts';
+import { startApp, unavailableUrl, USER } from '../../../evals/app/server.ts';
 import type { AppConfig } from '../../../evals/app/server.ts';
 
 // The fixture app over real HTTP on 127.0.0.1. No browser and no external network.
@@ -63,5 +63,47 @@ describe('fixture app', () => {
   test('unknown paths are 404', async (t) => {
     const { url } = await app(t, { profileApi: 'ok' });
     assert.equal((await fetch(`${url}/nope`)).status, 404);
+  });
+});
+
+describe('fixture app fault modes (Stage 2.6)', () => {
+  test('"fail-first" answers the first profile request with 500 and later ones with 200, per server', async (t) => {
+    const { url } = await app(t, { profileApi: 'fail-first' });
+    assert.equal((await fetch(`${url}/api/profile`)).status, 500);
+    const second = await fetch(`${url}/api/profile`);
+    assert.equal(second.status, 200);
+    assert.deepEqual(await second.json(), { name: USER.name, email: USER.email });
+    assert.equal((await fetch(`${url}/api/profile`)).status, 200);
+    const other = await app(t, { profileApi: 'fail-first' });
+    assert.equal((await fetch(`${other.url}/api/profile`)).status, 500, 'a new server starts its own count');
+  });
+
+  test('profileDelayMs delays a successful profile response', async (t) => {
+    const { url } = await app(t, { profileApi: 'ok', profileDelayMs: 300 });
+    const started = Date.now();
+    const res = await fetch(`${url}/api/profile`);
+    assert.equal(res.status, 200);
+    assert.ok(Date.now() - started >= 250, 'response was delayed');
+    const page = Date.now();
+    assert.equal((await fetch(`${url}/profile`)).status, 200);
+    assert.ok(Date.now() - page < 250, 'other routes are not delayed');
+  });
+
+  test('"hang" never answers the profile API, and close() still completes', async () => {
+    const running = await startApp({ profileApi: 'hang' });
+    const controller = new AbortController();
+    const pending = fetch(`${running.url}/api/profile`, { signal: controller.signal });
+    const outcome = await Promise.race([pending.then(() => 'answered', () => 'failed'), new Promise((resolve) => setTimeout(() => resolve('pending'), 300))]);
+    assert.equal(outcome, 'pending');
+    assert.equal((await fetch(`${running.url}/profile`)).status, 200, 'the page itself still loads');
+    await running.close();
+    controller.abort();
+    await assert.rejects(pending);
+  });
+
+  test('unavailableUrl() is a local URL where connections are refused', async () => {
+    const url = await unavailableUrl();
+    assert.match(url, /^http:\/\/127\.0\.0\.1:\d+$/);
+    await assert.rejects(fetch(`${url}/profile`));
   });
 });

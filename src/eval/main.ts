@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { runControl } from './control.ts';
 import { generateSnapshot } from './generate.ts';
 import type { GenerateOutcome } from './generate.ts';
 import { LIVE_USAGE, parseLiveArgs, runLiveEvaluation } from './live.ts';
@@ -8,11 +9,12 @@ import { reportCombined, reportRun, scoreRun } from './runs.ts';
 import type { ScoreRecord } from './score.ts';
 
 // Evaluation CLI (`npm run eval -- <command>`). Wiring only. Output goes to stdout; errors to stderr.
-// Only `live` makes model requests (one scenario, one session, explicit budget). generate, score and
-// report never do; score and report read saved files only (see runs.ts).
+// Only `live` makes model requests (one scenario, one session, explicit budget). generate, control,
+// score and report never do; score and report read saved files only (see runs.ts).
 
 const USAGE = `Usage:
   npm run eval -- generate --scenario <id> [--keep-stage]
+  npm run eval -- control --scenario <id> [--keep-stage]
   npm run eval -- score --run <dir> [--snapshots <dir>] [--scenarios <dir>] [--rescore]
   npm run eval -- report --run <dir>
   npm run eval -- report --run <dir> --run <dir> [...] --out <dir>
@@ -21,6 +23,11 @@ const USAGE = `Usage:
 generate   Run one scenario's spec with Playwright against the local fixture app and store the
            verified result as evals/snapshots/<id>/. No model requests. Never overwrites a snapshot.
   --scenario <id>     Scenario ID, e.g. S02
+  --keep-stage        Keep the .work/<random>/ staging directory for debugging
+
+control    Run the scenario's corrected spec (control/<spec>) against the same fixture behavior and
+           Playwright settings; it must pass. No model requests. Stores nothing.
+  --scenario <id>     Scenario ID with a control spec, e.g. S03
   --keep-stage        Keep the .work/<random>/ staging directory for debugging
 
 score      Score every saved evaluation in a run directory against its truth.json and writes
@@ -72,6 +79,19 @@ if (command === 'generate') {
   const outcome = await generateSnapshot(values.scenario, { repoRoot, keepStage: values['keep-stage'] === true });
   console.log(render(values.scenario, outcome));
   process.exitCode = outcome.ok ? 0 : 1;
+} else if (command === 'control') {
+  if (!values.scenario) usageError('control needs --scenario <id>');
+  try {
+    const outcome = await runControl(values.scenario, { repoRoot, keepStage: values['keep-stage'] === true });
+    const lines = [`# eval control ${values.scenario}: ${outcome.ok ? 'passed' : 'FAILED'}`, '', ...outcome.checks.map((c) => `- ${c.ok ? '✅' : '❌'} ${c.name}: ${c.detail}`)];
+    if (!outcome.ok && outcome.output) lines.push('', '**Playwright output (tail):**', '```', outcome.output.slice(-4000), '```');
+    lines.push('', outcome.stageKept ? `**Stage kept:** \`${outcome.stageDir}\`` : '**Stage removed.**');
+    console.log(lines.join('\n'));
+    process.exitCode = outcome.ok ? 0 : 1;
+  } catch (error) {
+    console.error(`eval control: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
 } else if (command === 'score' || command === 'report') {
   const runs = values.run ?? [];
   if (runs.length === 0) usageError(`${command} needs --run <dir>`);
@@ -96,7 +116,7 @@ if (command === 'generate') {
     process.exitCode = 1;
   }
 } else {
-  usageError('expected one command: generate, score or report');
+  usageError('expected one command: generate, control, score or report');
 }
 
 function usageError(message: string): never {

@@ -59,7 +59,7 @@ describe('module separation', () => {
     for (const module of ['generation.ts', 'generate.ts', 'snapshots.ts']) await visit(path.join(EVAL_DIR, module));
     const reached = [...seen].map((f) => path.relative(EVAL_DIR, f).split(path.sep).join('/'));
     assert.ok(reached.includes('../mcp/report.ts'), `import graph walked (${reached.join(', ')})`);
-    for (const forbidden of ['truth.ts', 'isolation.ts', 'workspace.ts', 'score.ts', 'report.ts', 'runs.ts', 'live.ts', '../agent/result.ts']) {
+    for (const forbidden of ['truth.ts', 'control.ts', 'isolation.ts', 'workspace.ts', 'score.ts', 'report.ts', 'runs.ts', 'live.ts', '../agent/result.ts']) {
       assert.ok(!reached.includes(forbidden), `the generator reaches ${forbidden}`);
     }
   });
@@ -103,6 +103,13 @@ describe('module separation', () => {
     for (const module of ['generation.ts', 'generate.ts', 'snapshots.ts']) {
       const source = await readFile(path.join(EVAL_DIR, module), 'utf8');
       assert.doesNotMatch(source, /TRUTH_FILE|truth\.json/, `${module} refers to ground truth`);
+    }
+  });
+
+  test('generator-side modules never name the control specs (corrected tests are answers)', async () => {
+    for (const module of ['generation.ts', 'generate.ts', 'snapshots.ts']) {
+      const source = await readFile(path.join(EVAL_DIR, module), 'utf8');
+      assert.doesNotMatch(source, /CONTROL_DIR|control\.ts|['"`/]control\//, `${module} refers to control specs`);
     }
   });
 

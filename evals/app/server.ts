@@ -9,10 +9,15 @@ import { parseArgs } from 'node:util';
 //   GET  /login         login form (Username, Password, "Log in" button)
 //   POST /login         valid credentials -> 303 /profile, otherwise 401 with an alert
 //   GET  /profile       page that loads /api/profile in the browser
-//   GET  /api/profile   200 JSON, or 500 when profileApi is "error"
+//   GET  /api/profile   by profileApi mode:
+//                         ok          200 JSON (after profileDelayMs, if set)
+//                         error       500
+//                         fail-first  500 for this server's first request, 200 afterwards
+//                         hang        never answers (the connection is dropped on close)
 
-export const PROFILE_API_MODES = ['ok', 'error'] as const;
-export type AppConfig = { profileApi: (typeof PROFILE_API_MODES)[number] };
+export const PROFILE_API_MODES = ['ok', 'error', 'fail-first', 'hang'] as const;
+export const MAX_PROFILE_DELAY_MS = 5_000;
+export type AppConfig = { profileApi: (typeof PROFILE_API_MODES)[number]; profileDelayMs?: number };
 export type RunningApp = { url: string; close: () => Promise<void> };
 
 export const USER = { username: 'demo', password: 'demo-password', name: 'Dana Demo', email: 'dana@example.test' };
@@ -20,8 +25,9 @@ export const USER = { username: 'demo', password: 'demo-password', name: 'Dana D
 const MAX_BODY_BYTES = 10_000;
 
 export function createApp(config: AppConfig): http.Server {
+  const state: AppState = { profileRequests: 0 };
   return http.createServer((req, res) => {
-    handle(config, req, res).catch(() => {
+    handle(config, state, req, res).catch(() => {
       if (!res.headersSent) send(res, 500, 'text/plain', 'fixture app error');
       else res.destroy();
     });
@@ -46,7 +52,20 @@ export async function startApp(config: AppConfig, port = 0): Promise<RunningApp>
   };
 }
 
-async function handle(config: AppConfig, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+/**
+ * A URL on 127.0.0.1 where nothing listens: binds a free port, then releases it, so connecting
+ * is refused. Another process could take the port in between; callers verify the refusal.
+ */
+export async function unavailableUrl(): Promise<string> {
+  const app = await startApp({ profileApi: 'ok' });
+  await app.close();
+  return app.url;
+}
+
+/** Per-server state, so each started app (one per generated run) counts its own requests. */
+type AppState = { profileRequests: number };
+
+async function handle(config: AppConfig, state: AppState, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const { pathname } = new URL(req.url ?? '/', 'http://localhost');
   const route = `${req.method} ${pathname}`;
   if (route === 'GET /') return redirect(res, '/login');
@@ -58,7 +77,11 @@ async function handle(config: AppConfig, req: http.IncomingMessage, res: http.Se
   }
   if (route === 'GET /profile') return send(res, 200, 'text/html', PROFILE_PAGE);
   if (route === 'GET /api/profile') {
-    if (config.profileApi === 'error') return send(res, 500, 'application/json', JSON.stringify({ error: 'Internal Server Error' }));
+    state.profileRequests += 1;
+    const failed = config.profileApi === 'error' || (config.profileApi === 'fail-first' && state.profileRequests === 1);
+    if (failed) return send(res, 500, 'application/json', JSON.stringify({ error: 'Internal Server Error' }));
+    if (config.profileApi === 'hang') return;
+    if (config.profileDelayMs) await new Promise((resolve) => setTimeout(resolve, config.profileDelayMs));
     return send(res, 200, 'application/json', JSON.stringify({ name: USER.name, email: USER.email }));
   }
   send(res, 404, 'text/plain', 'Not found');
@@ -138,15 +161,18 @@ const PROFILE_PAGE = layout(
 </script>`,
 );
 
-// Manual use: node evals/app/server.ts [--profile-api ok|error] [--port n]
+// Manual use: node evals/app/server.ts [--profile-api ok|error|fail-first|hang] [--profile-delay-ms n] [--port n]
 if (import.meta.main) {
-  const { values } = parseArgs({ options: { 'profile-api': { type: 'string', default: 'ok' }, port: { type: 'string', default: '0' } } });
+  const { values } = parseArgs({
+    options: { 'profile-api': { type: 'string', default: 'ok' }, 'profile-delay-ms': { type: 'string', default: '0' }, port: { type: 'string', default: '0' } },
+  });
   const mode = values['profile-api'];
   if (!PROFILE_API_MODES.some((m) => m === mode)) {
     console.error(`--profile-api must be one of: ${PROFILE_API_MODES.join(', ')}`);
     process.exit(2);
   }
-  const app = await startApp({ profileApi: mode as AppConfig['profileApi'] }, Number(values.port));
-  console.log(`fixture app listening on ${app.url} (profileApi: ${mode})`);
+  const delay = Number(values['profile-delay-ms']);
+  const app = await startApp({ profileApi: mode as AppConfig['profileApi'], profileDelayMs: delay }, Number(values.port));
+  console.log(`fixture app listening on ${app.url} (profileApi: ${mode}, profileDelayMs: ${delay})`);
   process.on('SIGINT', () => void app.close().then(() => process.exit(0)));
 }

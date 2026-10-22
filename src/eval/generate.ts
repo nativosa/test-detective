@@ -3,10 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { startApp } from '../../evals/app/server.ts';
+import { startApp, unavailableUrl } from '../../evals/app/server.ts';
 import { getFailureDetails, listFailures, loadReport } from '../mcp/report.ts';
 import type { FailureDetailsOutput, ListFailuresOutput } from '../mcp/report.ts';
-import { loadGenerationConfig } from './generation.ts';
+import { loadGenerationConfig, postRunSpecPath } from './generation.ts';
 import type { GenerationConfig } from './generation.ts';
 import { GENERATION_FILE, scenarioDir, SCENARIOS_DIR } from './scenarios.ts';
 import { sha256, SNAPSHOTS_DIR, writeSnapshot } from './snapshots.ts';
@@ -22,6 +22,9 @@ import type { Check, LoadedSnapshot } from './snapshots.ts';
 //   .work/<random>/artifacts/results.json
 //   .work/<random>/test-results/...
 // The stage lives inside the repo only so `@playwright/test` resolves from node_modules.
+//
+// A postRun scenario overwrites the stage spec with post-run/<spec> after Playwright exits, so the
+// snapshot's source is genuinely newer than the run and differs from the artifacts.
 
 export type PlaywrightRun = { stageDir: string; configFile: string; env: Record<string, string | undefined>; timeoutMs: number };
 export type PlaywrightResult = { exitCode: number | null; output: string; timedOut: boolean };
@@ -114,20 +117,15 @@ type StageResult = { ok: boolean; reason?: string; checks: Check[]; facts: Failu
 
 async function generateInStage(config: GenerationConfig, scenariosRoot: string, stageDir: string, runPlaywright: RunPlaywright): Promise<StageResult> {
   // Only the declared spec is copied; nothing else from the scenario directory enters the stage.
-  const specSource = path.join(scenarioDir(config.id, scenariosRoot), ...config.spec.split('/'));
-  await cp(specSource, path.join(stageDir, ...config.spec.split('/')), { preserveTimestamps: true, errorOnExist: true, force: false });
-  const configFile = path.join(stageDir, 'playwright.config.ts');
-  await writeFile(configFile, stageConfigSource(config), { flag: 'wx' });
-
-  const app = await startApp(config.app);
-  let result: PlaywrightResult;
-  try {
-    result = await runPlaywright({ stageDir, configFile, env: playwrightEnv(process.env, app.url), timeoutMs: PLAYWRIGHT_TIMEOUT_MS });
-  } finally {
-    await app.close();
-  }
+  const scenario = scenarioDir(config.id, scenariosRoot);
+  const stageSpec = path.join(stageDir, ...config.spec.split('/'));
+  await cp(path.join(scenario, ...config.spec.split('/')), stageSpec, { preserveTimestamps: true, errorOnExist: true, force: false });
+  const result = await runStage(config, stageDir, runPlaywright);
   const { output } = result;
   if (result.timedOut) return { ok: false, reason: `Playwright did not finish within ${PLAYWRIGHT_TIMEOUT_MS / 1000}s.`, checks: [], facts: null, output };
+  const edited = postRunSpecPath(config);
+  // Written, not copied: copyFile keeps the source's mtime on Windows, and the edit must happen now.
+  if (edited !== null) await writeFile(stageSpec, await readFile(path.join(scenario, ...edited.split('/'))));
 
   let facts: FailureFacts;
   let reportRoot: string | undefined;
@@ -144,7 +142,7 @@ async function generateInStage(config: GenerationConfig, scenariosRoot: string, 
   const checks = [
     check('report-root', samePath(reportRoot, stageDir), `report root ${reportRoot ?? 'unknown'}`),
     check('playwright-exit', result.exitCode === (config.expectObservation.outcome === 'unexpected' ? 1 : 0), `exit code ${result.exitCode}`),
-    ...checkObservation(config, facts),
+    ...checkObservation(config, facts, await observeStage(config, stageDir, facts)),
   ];
   const failed = checks.filter((c) => !c.ok);
   if (failed.length > 0) {
@@ -153,19 +151,64 @@ async function generateInStage(config: GenerationConfig, scenariosRoot: string, 
   return { ok: true, checks, facts, output };
 }
 
+/**
+ * Writes the stage config, starts the fixture app (or, for `server: down`, takes a URL where nothing
+ * listens), runs Playwright and closes the app. Shared with control runs.
+ */
+export async function runStage(config: GenerationConfig, stageDir: string, runPlaywright: RunPlaywright): Promise<PlaywrightResult> {
+  const configFile = path.join(stageDir, 'playwright.config.ts');
+  await writeFile(configFile, stageConfigSource(config), { flag: 'wx' });
+  const app = config.app.server === 'down' ? { url: await unavailableUrl(), close: async () => {} } : await startApp(config.app);
+  try {
+    return await runPlaywright({ stageDir, configFile, env: playwrightEnv(process.env, app.url), timeoutMs: PLAYWRIGHT_TIMEOUT_MS });
+  } finally {
+    await app.close();
+  }
+}
+
+/** Stage files the observation checks need beyond the report. */
+export type StageObservation = {
+  /** The spec as it will be stored in the snapshot. */
+  spec: { mtimeMs: number; text: string };
+  /** error-context.md contents per failed attempt (by retry number); null when it has none. */
+  errorContexts: Map<number, string | null>;
+  /** Every file under the stage's test-results/, as POSIX paths relative to the stage. */
+  resultFiles: string[];
+};
+
+async function observeStage(config: GenerationConfig, stageDir: string, { details }: FailureFacts): Promise<StageObservation> {
+  const specFile = path.join(stageDir, ...config.spec.split('/'));
+  const info = await stat(specFile);
+  const errorContexts = new Map<number, string | null>();
+  for (const attempt of details.flatMap((d) => d.attempts).filter((a) => a.status !== 'passed')) {
+    const file = attempt.attachments.find((a) => a.name === 'error-context' && a.location === 'repo' && a.exists === true)?.path;
+    errorContexts.set(attempt.retry, file ? await readFile(path.join(stageDir, ...file.split('/')), 'utf8') : null);
+  }
+  const entries = await readdir(path.join(stageDir, 'test-results'), { recursive: true, withFileTypes: true }).catch(() => []);
+  const resultFiles = entries.filter((e) => e.isFile()).map((e) => path.relative(stageDir, path.join(e.parentPath, e.name)).split(path.sep).join('/'));
+  return { spec: { mtimeMs: info.mtimeMs, text: await readFile(specFile, 'utf8') }, errorContexts, resultFiles };
+}
+
 // ---------------------------------------------------------------------------
 // Observation checks (pure)
 
 const check = (name: string, ok: boolean, detail: string): Check => ({ name, ok, detail });
+const ATTACHMENT_FILES = { trace: /(^|\/)trace\.zip$/, screenshot: /\.png$/, 'error-context': /(^|\/)error-context\.md$/ } as const;
+const ANSI = /\u001b\[[0-9;]*m/g;
 
-/** Checks a stage report (as the MCP layer reads it) against the scenario's expected observation. */
-export function checkObservation(config: GenerationConfig, { list, details }: FailureFacts): Check[] {
+/**
+ * Checks a stage report (as the MCP layer reads it) against the scenario's expected observation.
+ * `stage` adds the checks that need stage files (source timing, error-context contents, absent
+ * attachment files); generation always passes it.
+ */
+export function checkObservation(config: GenerationConfig, { list, details }: FailureFacts, stage?: StageObservation): Check[] {
   const expect = config.expectObservation;
   const checks: Check[] = [check('global-errors', list.globalErrors.count === 0, `${list.globalErrors.count} global error(s)`)];
   const totalTests = list.stats.expected + list.stats.unexpected + list.stats.flaky + list.stats.skipped;
 
   if (expect.outcome === 'expected') {
     checks.push(check('outcome', list.failureCount === 0 && list.stats.expected > 0, `${list.failureCount} failure(s), ${list.stats.expected} passed`));
+    if (stage) checks.push(sourceTimingCheck(config, list, null, stage));
     return checks;
   }
   const failure = list.failures[0];
@@ -207,8 +250,57 @@ export function checkObservation(config: GenerationConfig, { list, details }: Fa
         unresolved.length ? unresolved.map((a) => `${a.name}: ${a.location} ${a.issue ?? ''}`.trim()).join('; ') : 'all file attachments resolve under test-results/',
       ),
     );
+    if (expect.maxFailedAttemptMs !== undefined) {
+      const ms = attempt.durationMs;
+      checks.push(check(`duration-retry-${attempt.retry}`, ms !== null && ms <= expect.maxFailedAttemptMs, `${ms ?? 'unknown'} ms, at most ${expect.maxFailedAttemptMs} ms`));
+    }
+    if (expect.errorContextPattern !== undefined) {
+      const text = stage?.errorContexts.get(attempt.retry) ?? null;
+      const ok = text !== null && new RegExp(expect.errorContextPattern, 'i').test(text);
+      checks.push(check(`error-context-retry-${attempt.retry}`, ok, text === null ? 'no error-context.md' : `/${expect.errorContextPattern}/i ${ok ? 'found' : 'not found'}`));
+    }
   }
+
+  const absent = expect.absentAttachments ?? [];
+  if (absent.length > 0) {
+    const listed = detail.attempts.flatMap((a) => a.attachments.filter((x) => absent.some((n) => n === x.name)).map((x) => `retry ${a.retry} lists ${x.name}`));
+    const files = (stage?.resultFiles ?? []).filter((f) => absent.some((n) => ATTACHMENT_FILES[n].test(f))).map((f) => `file ${f}`);
+    const problems = [...listed, ...files];
+    checks.push(check('absent-attachments', problems.length === 0, problems.length ? problems.join('; ') : `no ${absent.join(', ')}`));
+  }
+  if (stage) checks.push(sourceTimingCheck(config, list, failedAttempts.find((a) => a.error?.location) ?? null, stage));
   return checks;
+}
+
+type Attempt = FailureDetailsOutput['attempts'][number];
+
+/**
+ * before-run (default): the stored spec is older than the run start, so its timestamp suggests no edit.
+ * after-run: it is newer than the run end and its failing line differs from the error snippet, so
+ * both signals a reader can use to notice a source/artifact mismatch are present.
+ */
+function sourceTimingCheck(config: GenerationConfig, list: ListFailuresOutput, failed: Attempt | null, stage: StageObservation): Check {
+  const start = Date.parse(list.run.startTime ?? '');
+  if (Number.isNaN(start)) return check('source-timing', false, 'the report has no run start time');
+  const end = start + list.run.durationMs;
+  const mtime = new Date(stage.spec.mtimeMs).toISOString();
+  if ((config.expectObservation.sourceTiming ?? 'before-run') === 'before-run') {
+    return check('source-timing', stage.spec.mtimeMs < start, `spec modified ${mtime}, run started ${new Date(start).toISOString()}`);
+  }
+  const location = failed?.error?.location ?? null;
+  const marked = failed?.error?.snippet
+    ?.replace(ANSI, '')
+    .split('\n')
+    .find((l) => /^\s*>\s*\d+\s*\|/.test(l));
+  const snippetLine = marked?.replace(/^\s*>\s*\d+\s*\|/, '').trim();
+  const currentLine = location ? stage.spec.text.split(/\r?\n/)[location.line - 1]?.trim() : undefined;
+  const newer = stage.spec.mtimeMs > end;
+  const differs = snippetLine !== undefined && currentLine !== undefined && snippetLine !== currentLine;
+  return check(
+    'source-timing',
+    newer && differs,
+    `spec modified ${mtime}, run ended ${new Date(end).toISOString()}; line ${location?.line ?? '?'} ${differs ? 'differs from' : 'does not differ from'} the snippet`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -228,8 +320,8 @@ export default defineConfig({
   },
   use: {
     baseURL: process.env.BASE_URL,
-    trace: 'retain-on-failure',
-    screenshot: 'only-on-failure',
+    trace: '${config.playwright.trace ?? 'retain-on-failure'}',
+    screenshot: '${config.playwright.screenshot ?? 'only-on-failure'}',
     video: 'off',
   },
   projects: [
@@ -261,7 +353,7 @@ export function playwrightArgs(cli: string, run: Pick<PlaywrightRun, 'stageDir' 
   return [cli, 'test', '--config', run.configFile, '--output', path.join(run.stageDir, 'test-results'), '--workers=1'];
 }
 
-function spawnPlaywright(repoRoot: string, run: PlaywrightRun): Promise<PlaywrightResult> {
+export function spawnPlaywright(repoRoot: string, run: PlaywrightRun): Promise<PlaywrightResult> {
   const cli = path.join(repoRoot, 'node_modules', '@playwright', 'test', 'cli.js');
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, playwrightArgs(cli, run), {

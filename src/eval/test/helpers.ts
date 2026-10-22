@@ -27,7 +27,7 @@ export async function copyScenario(root: string, fromId: string, asId = fromId, 
   await writeFile(file, JSON.stringify(config, null, 2));
 }
 
-/** A real, verified snapshot of a copied S02 scenario, generated with the fake Playwright. */
+/** A real, verified snapshot of a copied scenario (default S02), generated with the fake Playwright. */
 export async function fakeSnapshot(t: TestContext, options: FakeRunOptions = {}): Promise<{ snapshot: LoadedSnapshot; base: string; snapshotsRoot: string }> {
   return buildFakeSnapshot(await tempDir(t), options);
 }
@@ -37,11 +37,12 @@ export async function buildFakeSnapshot(
   base: string,
   options: FakeRunOptions = {},
   editGeneration?: (config: Record<string, any>) => void,
+  scenarioId = 'S02',
 ): Promise<{ snapshot: LoadedSnapshot; base: string; snapshotsRoot: string }> {
   const scenariosRoot = path.join(base, 'scenarios');
-  await copyScenario(scenariosRoot, 'S02', 'S02', editGeneration);
+  await copyScenario(scenariosRoot, scenarioId, scenarioId, editGeneration);
   const snapshotsRoot = path.join(base, 'snapshots');
-  const outcome = await generateSnapshot('S02', {
+  const outcome = await generateSnapshot(scenarioId, {
     repoRoot: base,
     scenariosRoot,
     snapshotsRoot,
@@ -71,6 +72,12 @@ export type FakeRunOptions = {
   errorContextExtra?: string;
   /** Called during the run, e.g. to probe BASE_URL while the app is up. */
   during?: (run: PlaywrightRun) => Promise<void>;
+  /** Failing line (relative to the stage) and code frame on the primary error. */
+  errorAt?: { file: string; line: number; snippet: string };
+  /** Each failed attempt's duration. Default 100 ms. */
+  durationMs?: number;
+  /** The reported test: its file relative to tests/ and its title. Default S02's login test. */
+  test?: { file: string; title: string };
 };
 
 const FILES = { trace: 'trace.zip', screenshot: 'test-failed-1.png', 'error-context': 'error-context.md' } as const;
@@ -80,13 +87,22 @@ const TYPES = { trace: 'application/zip', screenshot: 'image/png', 'error-contex
 export function fakePlaywright(options: FakeRunOptions = {}, runs: PlaywrightRun[] = []): RunPlaywright {
   return async (run: PlaywrightRun): Promise<PlaywrightResult> => {
     runs.push(run);
+    // Like Playwright, the report's startTime is when the run began.
+    const startedAt = Date.now();
     await options.during?.(run);
     if (options.throws) throw options.throws;
     const statuses = options.attempts ?? ['failed'];
     const names = options.attachments ?? ['screenshot', 'error-context', 'trace'];
-    const resultsDir = path.join(options.outsideDir ?? run.stageDir, 'test-results', 'ui-login-signs-in-chromium');
+    const spec = options.test ?? { file: 'ui/login.spec.ts', title: 'signs in with valid credentials' };
+    const slug = options.test ? `${spec.file.replace(/\.spec\.ts$/, '')}-${spec.title}`.replace(/[^a-z0-9]+/gi, '-').toLowerCase() : 'ui-login-signs-in';
+    const resultsDir = path.join(options.outsideDir ?? run.stageDir, 'test-results', `${slug}-chromium`);
     await mkdir(resultsDir, { recursive: true });
-    const primary = { message: options.message ?? 'Test timeout of 15000ms exceeded.' };
+    const primary = {
+      message: options.message ?? 'Test timeout of 15000ms exceeded.',
+      ...(options.errorAt
+        ? { location: { file: path.join(run.stageDir, ...options.errorAt.file.split('/')), line: options.errorAt.line, column: 5 }, snippet: options.errorAt.snippet }
+        : {}),
+    };
     const results = [];
     for (const [retry, status] of statuses.entries()) {
       const attachments = [];
@@ -102,7 +118,7 @@ export function fakePlaywright(options: FakeRunOptions = {}, runs: PlaywrightRun
         retry,
         status,
         startTime: new Date(Date.now() + retry).toISOString(),
-        duration: 100,
+        duration: status === 'passed' ? 100 : (options.durationMs ?? 100),
         // Like the real S02 report: `error` is the timeout, errors[0] repeats it, errors[1] is the locator.
         errors: status === 'passed' ? [] : [primary, ...(options.message ? [] : [LOCATOR_ERROR])],
         ...(status === 'passed' ? {} : { error: primary }),
@@ -122,13 +138,13 @@ export function fakePlaywright(options: FakeRunOptions = {}, runs: PlaywrightRun
       },
       suites: [
         {
-          title: 'ui\\login.spec.ts',
-          file: 'ui/login.spec.ts',
+          title: spec.file.replaceAll('/', '\\'),
+          file: spec.file,
           specs: [
             {
-              title: 'signs in with valid credentials',
+              title: spec.title,
               id: 'aaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbb',
-              file: 'ui/login.spec.ts',
+              file: spec.file,
               line: 3,
               column: 1,
               tags: [],
@@ -139,8 +155,8 @@ export function fakePlaywright(options: FakeRunOptions = {}, runs: PlaywrightRun
       ],
       errors: [],
       stats: {
-        startTime: new Date().toISOString(),
-        duration: 100,
+        startTime: new Date(startedAt).toISOString(),
+        duration: Date.now() - startedAt,
         expected: testStatus === 'expected' ? 1 : 0,
         unexpected: testStatus === 'unexpected' ? 1 : 0,
         flaky: testStatus === 'flaky' ? 1 : 0,
@@ -149,6 +165,8 @@ export function fakePlaywright(options: FakeRunOptions = {}, runs: PlaywrightRun
     };
     await mkdir(path.join(run.stageDir, 'artifacts'), { recursive: true });
     await writeFile(path.join(run.stageDir, 'artifacts', 'results.json'), JSON.stringify(report, null, 2));
+    // A real Playwright process exits a little after writing its report.
+    await new Promise((resolve) => setTimeout(resolve, 5));
     return { exitCode: options.exitCode ?? (testStatus === 'unexpected' ? 1 : 0), output: 'fake playwright output', timedOut: options.timedOut ?? false };
   };
 }
