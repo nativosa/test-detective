@@ -1,0 +1,21 @@
+{
+  "id": "S06",
+  "spec": "tests/ui/profile.spec.ts",
+  "app": {
+    "profileApi": "ok",
+    "server": "down"
+  },
+  "playwright": {
+    "retries": 0,
+    "testTimeoutMs": 15000
+  },
+  "expectObservation": {
+    "outcome": "unexpected",
+    "errorPattern": "ERR_CONNECTION_REFUSED",
+    "attachments": [
+      "trace",
+      "screenshot",
+      "error-context"
+    ]
+  }
+}

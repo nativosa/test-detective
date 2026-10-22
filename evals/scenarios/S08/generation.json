@@ -1,0 +1,25 @@
+{
+  "id": "S08",
+  "spec": "tests/ui/profile.spec.ts",
+  "app": {
+    "profileApi": "hang"
+  },
+  "playwright": {
+    "retries": 0,
+    "testTimeoutMs": 15000,
+    "trace": "off",
+    "screenshot": "off"
+  },
+  "expectObservation": {
+    "outcome": "unexpected",
+    "errorPattern": "toBeVisible",
+    "attachments": [
+      "error-context"
+    ],
+    "absentAttachments": [
+      "trace",
+      "screenshot"
+    ],
+    "errorContextPattern": "Loading your profile"
+  }
+}

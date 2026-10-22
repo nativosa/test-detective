@@ -1,0 +1,159 @@
+{
+  "id": "S07",
+  "canary": "TDCANARY-8527acd9-94f6-4219-b194-6d6f1ee0b2ec",
+  "description": "Synthetic, deterministic flakiness: the fixture answers its first /api/profile request with a real HTTP 500 and every later one with 200, so attempt 1 fails (the page shows its error alert) and the retry passes. Playwright reports the test as flaky. This is a scripted fault, not naturally occurring flakiness, and one run says nothing about how often it would fail. The test does not mock anything.",
+  "failureType": "intermittent_failure",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [
+      {
+        "title": "shows the signed-in user on the profile page",
+        "file": "tests/ui/profile.spec.ts",
+        "reportedOutcome": "flaky"
+      }
+    ],
+    "classification": "Application defect",
+    "acceptableAlternatives": [],
+    "reviewableAlternatives": [
+      {
+        "classification": "Environment issue",
+        "note": "A transient backend 500 can come from where the server runs (a dependency, warm-up); defensible only when supported by the observed failure",
+        "requires": {
+          "id": "cites-server-error",
+          "description": "Supports it with the HTTP 500 the server returned in the failed attempt",
+          "anyOf": [
+            "\\b500\\b",
+            "internal server error",
+            "server error"
+          ]
+        }
+      }
+    ],
+    "sourceMismatch": false,
+    "confidence": [
+      "High",
+      "Medium"
+    ]
+  },
+  "rootCause": {
+    "summary": "Attempt 1: GET /api/profile returned a real 500 (no route mocking, no _wasFulfilled), so the page showed its error alert and 'Dana Demo' never appeared. The retry got 200 and passed: an intermittent server-side failure.",
+    "criteria": [
+      {
+        "id": "flaky",
+        "description": "Recognises the flaky outcome (failed, then passed on retry)",
+        "anyOf": [
+          "flaky",
+          "passed on (the )?(first )?retry",
+          "intermittent",
+          "transient",
+          "retry (1|#1) passed",
+          "(second|next) attempt passed",
+          "passed (on|after) (a |the )?retry"
+        ]
+      },
+      {
+        "id": "server-error",
+        "description": "Identifies the HTTP 500 in the failed attempt",
+        "anyOf": [
+          "\\b500\\b",
+          "internal server error",
+          "server error"
+        ]
+      },
+      {
+        "id": "profile-api",
+        "description": "Points at the profile API request",
+        "anyOf": [
+          "/api/profile",
+          "profile (api|endpoint|request)"
+        ]
+      }
+    ],
+    "forbiddenClaims": [
+      {
+        "id": "claims-mock",
+        "description": "Claims the test mocked the response",
+        "pattern": "the test (mocks|mocked|stubs|stubbed|fulfills|fulfilled)"
+      },
+      {
+        "id": "blames-locator",
+        "description": "Blames the test's locators or expected text",
+        "pattern": "(locator|selector) (is )?(wrong|incorrect)|wrong (expected )?text"
+      },
+      {
+        "id": "frequency-claim",
+        "description": "Claims a failure rate, frequency or recurrence that one flaky run cannot show",
+        "pattern": "\\d+ ?% of (the )?(runs|time|attempts)|failure rate|(fails|happens|occurs|recurs) (always|every time|consistently|frequently|often|regularly|rarely|about half)|(always|consistently|reliably) fails? (on )?the first|will (fail|happen|recur) again|(fails|happens|occurs) (on )?every (other |first )?(run|attempt)",
+        "severity": "fail"
+      }
+    ]
+  },
+  "requiredEvidence": [
+    {
+      "kind": "mcp",
+      "refPattern": "get_failure_details",
+      "why": "Failure data must come from the MCP tools",
+      "provisional": false
+    },
+    {
+      "kind": "source",
+      "refPattern": "^tests/ui/profile\\.spec\\.ts$",
+      "why": "Shows the test sets up no route mocking",
+      "provisional": false
+    },
+    {
+      "kind": "error_context",
+      "refPattern": "^test-results/.+/error-context\\.md$",
+      "why": "Confirmed (Playwright 1.64.1): retry 0's page snapshot shows the alert 'Something went wrong while loading your profile'",
+      "provisional": false
+    },
+    {
+      "kind": "trace",
+      "refPattern": "^test-results/.+/trace\\.zip$",
+      "why": "Confirmed (Playwright 1.64.1): in the failed attempt's trace the .network resource-snapshot for /api/profile has status 500 with real server headers (Date) and no _wasFulfilled; the passing retry keeps no trace",
+      "provisional": false
+    }
+  ],
+  "recommendations": {
+    "acceptable": [
+      {
+        "id": "fix-backend",
+        "description": "Investigate the intermittent server error",
+        "anyOf": [
+          "(fix|investigate|debug|check) .{0,40}(server|backend|api|endpoint)",
+          "server(-side)? logs"
+        ]
+      },
+      {
+        "id": "keep-test",
+        "description": "States the test itself needs no change",
+        "anyOf": [
+          "no (change|fix) (is )?(needed|required) (to|in) the test",
+          "test (is|looks) correct"
+        ]
+      }
+    ],
+    "forbidden": [
+      {
+        "id": "retries",
+        "description": "Hides the failure with retries",
+        "pattern": "add (a )?retr(y|ies)|increase (the )?retries|enable retries"
+      },
+      {
+        "id": "mock-it",
+        "description": "Mocks the API so the test passes",
+        "pattern": "page\\.route|route\\.fulfill|mock (the )?(api|endpoint|response)"
+      },
+      {
+        "id": "sleep",
+        "description": "Adds a fixed wait",
+        "pattern": "waitForTimeout|\\bsleep\\b"
+      },
+      {
+        "id": "more-time",
+        "description": "Raises timeouts",
+        "pattern": "increase (the )?(test |expect |action |navigation )?timeout"
+      }
+    ]
+  }
+}

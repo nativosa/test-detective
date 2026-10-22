@@ -33,6 +33,8 @@ export const EVAL_ONLY_STRINGS = [
   'requiredEvidence',
   'forbiddenClaims',
   'failureType',
+  'reviewableAlternatives',
+  'unavailableEvidence',
   'generationConfigSha256',
   'truth.json',
   'generation.json',

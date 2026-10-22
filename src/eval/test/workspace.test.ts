@@ -7,6 +7,7 @@ import { describe, test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { leakMarkers } from '../isolation.ts';
+import { listScenarioIds } from '../scenarios.ts';
 import { loadSnapshot, MANIFEST_FILE, SNAPSHOTS_DIR } from '../snapshots.ts';
 import { auditWorkspace, checkIntegrity, CONFIG_FILES, createWorkspace, REMOVAL_DEADLINE_MS, removeWorkspace, WORKSPACE_DIR, WORKSPACE_PREFIX, WorkspaceRemovalError } from '../workspace.ts';
 import type { Workspace } from '../workspace.ts';
@@ -299,16 +300,29 @@ describe('removeWorkspace: busy workspaces (Windows EBUSY)', () => {
 });
 
 // Gitignored; present only after `npm run eval -- generate`.
-describe('pilot snapshot workspaces (if present)', () => {
-  for (const id of ['S02', 'S04', 'S05']) {
+const scenarioIds = await listScenarioIds();
+
+describe('scenario snapshot workspaces (if present)', () => {
+  for (const id of scenarioIds) {
     test(`${id} materializes into a clean, audited workspace`, async (t) => {
       const present = await stat(path.join(SNAPSHOTS_DIR, id, MANIFEST_FILE)).then(() => true, () => false);
       if (!present) return t.skip(`no ${id} snapshot`);
       const parent = await tempDir(t, 'td-parent-');
-      const ws = await createWorkspace(await loadSnapshot(id), { repoRoot: REPO_ROOT, parent }, markers);
+      const snapshot = await loadSnapshot(id);
+      const ws = await createWorkspace(snapshot, { repoRoot: REPO_ROOT, parent }, markers);
       t.after(() => removeWorkspace(ws));
       assert.deepEqual((await auditWorkspace(ws, markers)).problems, []);
       assert.deepEqual(await checkIntegrity(ws), []);
+      // Exactly the agent-visible payload and the two session config files: no truth, generation
+      // config, manifest, control or post-run file, and no fixture or eval code.
+      const files = (await readdir(ws.root, { recursive: true, withFileTypes: true }))
+        .filter((e) => e.isFile())
+        .map((e) => path.relative(ws.root, path.join(e.parentPath, e.name)).split(path.sep).join('/'))
+        .sort();
+      assert.deepEqual(files, [...snapshot.manifest.files.map((f) => f.path), ...CONFIG_FILES].sort());
+      assert.ok(!files.some((f) => /(^|\/)(truth|generation|manifest)\.json$|^(control|post-run|evals|src)\//.test(f)), files.join(', '));
+      const parentFiles = await readdir(path.dirname(ws.root));
+      assert.deepEqual(parentFiles, [path.basename(ws.root)], 'nothing beside the project directory');
     });
   }
 });

@@ -1,0 +1,21 @@
+{
+  "id": "S07",
+  "spec": "tests/ui/profile.spec.ts",
+  "app": {
+    "profileApi": "fail-first"
+  },
+  "playwright": {
+    "retries": 1,
+    "testTimeoutMs": 15000
+  },
+  "expectObservation": {
+    "outcome": "flaky",
+    "errorPattern": "toBeVisible",
+    "attachments": [
+      "trace",
+      "screenshot",
+      "error-context"
+    ],
+    "errorContextPattern": "Something went wrong"
+  }
+}

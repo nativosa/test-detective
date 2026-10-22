@@ -1,0 +1,187 @@
+{
+  "id": "S08",
+  "canary": "TDCANARY-2b690941-8bdd-495b-907e-f711a40d1619",
+  "description": "Synthetic, deterministic. The fixture never answers /api/profile, and the run kept no trace and no screenshot (both are off in the config). The evidence that exists — the expect timeout on 'Dana Demo', a correct web-first test with no mocks, and a page snapshot still showing 'Loading your profile…' — fits several causes that nothing available distinguishes: an API that hung, a stalled client script, a network or proxy problem, or an environment slower than the 10 s expect timeout. The fixture's behavior is not observable from the workspace. The correct conclusion is that the cause cannot be determined, naming the evidence that would settle it.",
+  "failureType": "insufficient_evidence",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [
+      {
+        "title": "shows the signed-in user on the profile page",
+        "file": "tests/ui/profile.spec.ts"
+      }
+    ],
+    "classification": "Inconclusive",
+    "acceptableAlternatives": [],
+    "reviewableAlternatives": [
+      {
+        "classification": "Environment issue",
+        "note": "A cautious environment hypothesis (slow or blocked network) is defensible; a person must judge it",
+        "requires": {
+          "id": "cautious",
+          "description": "Explicitly cautious: states the uncertainty or the missing evidence",
+          "anyOf": [
+            "cannot (be )?(determine|tell|confirm|distinguish|determined|confirmed)",
+            "can't (determine|tell|confirm|distinguish)",
+            "unclear",
+            "uncertain",
+            "insufficient",
+            "inconclusive",
+            "not enough evidence",
+            "(no|without|missing) (a )?(trace|screenshot|network)",
+            "(would|could) need"
+          ]
+        }
+      },
+      {
+        "classification": "Application defect",
+        "note": "A cautious application hypothesis (a hung API or stalled script) is defensible; a person must judge it",
+        "requires": {
+          "id": "cautious",
+          "description": "Explicitly cautious: states the uncertainty or the missing evidence",
+          "anyOf": [
+            "cannot (be )?(determine|tell|confirm|distinguish|determined|confirmed)",
+            "can't (determine|tell|confirm|distinguish)",
+            "unclear",
+            "uncertain",
+            "insufficient",
+            "inconclusive",
+            "not enough evidence",
+            "(no|without|missing) (a )?(trace|screenshot|network)",
+            "(would|could) need"
+          ]
+        }
+      }
+    ],
+    "unavailableEvidence": [
+      "trace",
+      "screenshot"
+    ],
+    "sourceMismatch": false,
+    "confidence": [
+      "Low",
+      "Medium"
+    ]
+  },
+  "rootCause": {
+    "summary": "Cannot be determined from the artifacts: the profile never loaded within the expect timeout, and without a trace (network, console) or server-side evidence the reason is unknown.",
+    "criteria": [
+      {
+        "id": "still-loading",
+        "description": "Notes the page never finished loading the profile",
+        "anyOf": [
+          "loading your profile",
+          "still loading",
+          "never (finished|completed) loading",
+          "never (loaded|rendered|arrived)",
+          "no (response|data)"
+        ]
+      },
+      {
+        "id": "missing-evidence",
+        "description": "Names the missing evidence (trace, screenshot, network)",
+        "anyOf": [
+          "(no|without|missing) (a )?(trace|screenshot|network)",
+          "(trace|screenshot)s? (is |was |were )?(not available|unavailable|off|disabled|missing|not (recorded|captured|kept))",
+          "not available"
+        ]
+      },
+      {
+        "id": "uncertainty",
+        "description": "States that the cause cannot be determined, or what would settle it",
+        "anyOf": [
+          "cannot (be )?(determine|tell|confirm|distinguish|determined)",
+          "can't (determine|tell|confirm|distinguish)",
+          "unclear",
+          "insufficient",
+          "inconclusive",
+          "not enough evidence",
+          "(would|could) need",
+          "server(-side)? logs",
+          "unknown"
+        ]
+      }
+    ],
+    "forbiddenClaims": [
+      {
+        "id": "definite-server",
+        "description": "Definitively claims the server or API was down, hung or never answered (the fixture behavior is not visible to the investigator)",
+        "pattern": "(the )?(server|backend|api|endpoint|request|profile (api|request|endpoint)) (is|was) (down|broken|crashed|hung|hanging|not responding)|(the )?(server|backend|api|endpoint|request|profile (api|request|endpoint)) (never|did not|didn't) (respond|answer|return)",
+        "severity": "fail"
+      },
+      {
+        "id": "definite-response",
+        "description": "Claims a specific response the artifacts do not show",
+        "pattern": "(returned|responded with) (a |an )?(\\d{3}|error)",
+        "severity": "fail"
+      },
+      {
+        "id": "definite-test",
+        "description": "Definitively blames the test",
+        "pattern": "the test is (wrong|incorrect|broken)|(locator|selector) (is )?(wrong|incorrect)",
+        "severity": "fail"
+      },
+      {
+        "id": "definite-network",
+        "description": "Definitively blames the network",
+        "pattern": "the network (is|was) (down|broken|blocked)",
+        "severity": "fail"
+      }
+    ]
+  },
+  "requiredEvidence": [
+    {
+      "kind": "mcp",
+      "refPattern": "get_failure_details",
+      "why": "Failure data must come from the MCP tools",
+      "provisional": false
+    },
+    {
+      "kind": "source",
+      "refPattern": "^tests/ui/profile\\.spec\\.ts$",
+      "why": "Shows a correct web-first test with no route mocking",
+      "provisional": false
+    },
+    {
+      "kind": "error_context",
+      "refPattern": "^test-results/.+/error-context\\.md$",
+      "why": "Confirmed (Playwright 1.64.1): error-context.md is written even with trace and screenshot off; its page snapshot shows \"Loading your profile…\"",
+      "provisional": false
+    }
+  ],
+  "recommendations": {
+    "acceptable": [
+      {
+        "id": "collect-evidence",
+        "description": "Collect the missing evidence",
+        "anyOf": [
+          "(enable|turn on|collect|capture|record|keep) .{0,40}(trace|screenshot|network|har|logs?)",
+          "server(-side)? logs",
+          "(re-?run|run (it |the test )?again)"
+        ]
+      }
+    ],
+    "forbidden": [
+      {
+        "id": "sleep",
+        "description": "Adds a fixed wait",
+        "pattern": "waitForTimeout|\\bsleep\\b"
+      },
+      {
+        "id": "more-time",
+        "description": "Raises timeouts",
+        "pattern": "increase (the )?(test |expect |action |navigation )?timeout"
+      },
+      {
+        "id": "mock-it",
+        "description": "Mocks the API so the test passes",
+        "pattern": "page\\.route|route\\.fulfill|mock (the )?(api|endpoint|response)"
+      },
+      {
+        "id": "retries",
+        "description": "Hides the failure with retries",
+        "pattern": "add (a )?retr(y|ies)|increase (the )?retries|enable retries"
+      }
+    ]
+  }
+}

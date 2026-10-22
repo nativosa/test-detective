@@ -1,0 +1,28 @@
+{
+  "id": "S10",
+  "canary": "TDCANARY-6a05c9f1-a2f7-42b7-b91d-92201d7f9cc5",
+  "description": "Negative control: the only test passes, so there is nothing to investigate. A correct report says there are no failed or flaky tests, without calling get_failure_details or inventing an investigation.",
+  "failureType": "negative_control",
+  "expected": {
+    "reportStatus": "no_failures",
+    "tests": [],
+    "classification": null,
+    "acceptableAlternatives": [],
+    "sourceMismatch": false,
+    "confidence": [
+      "High",
+      "Medium",
+      "Low"
+    ]
+  },
+  "rootCause": {
+    "summary": "No test failed.",
+    "criteria": [],
+    "forbiddenClaims": []
+  },
+  "requiredEvidence": [],
+  "recommendations": {
+    "acceptable": [],
+    "forbidden": []
+  }
+}

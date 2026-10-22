@@ -1,0 +1,136 @@
+{
+  "id": "S09",
+  "canary": "TDCANARY-77ff84a7-b30e-4965-959e-47c2bdf198dd",
+  "description": "Synthetic, deterministic. The run used a test that expected the h1 to read 'My Profile' (the app shows 'Profile'), so it failed as a test-code defect. After the run, the spec was edited to expect 'Profile' and was not re-run: the current source's line 6 differs from the error snippet, its modification time is later than the run, and the as-run source still appears in error-context.md and the trace. The historical failure is a test-code defect; whether the current source passes is unknown until it is re-run.",
+  "failureType": "source_mismatch",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [
+      {
+        "title": "shows the profile heading",
+        "file": "tests/ui/profile.spec.ts"
+      }
+    ],
+    "classification": "Test-code defect",
+    "acceptableAlternatives": [],
+    "reviewableAlternatives": [
+      {
+        "classification": "Inconclusive",
+        "note": "Declining to diagnose because the source no longer matches the artifacts is defensible; a person must judge it",
+        "requires": {
+          "id": "cites-mismatch",
+          "description": "Grounds it in the source/artifact mismatch",
+          "anyOf": [
+            "(modified|changed|edited|updated) (after|since) (the )?(test )?(run|failure|execution)",
+            "mismatch",
+            "no longer matches",
+            "differs from",
+            "does not match the (artifacts|snippet|run)",
+            "newer than"
+          ]
+        }
+      }
+    ],
+    "sourceMismatch": true,
+    "confidence": [
+      "Medium",
+      "Low"
+    ]
+  },
+  "rootCause": {
+    "summary": "The run failed on toHaveText('My Profile') (the heading is 'Profile'); the source was changed after the run, so it no longer matches the artifacts and a re-run is needed to know the current state.",
+    "criteria": [
+      {
+        "id": "source-changed",
+        "description": "Says the source changed after the run / does not match the artifacts",
+        "anyOf": [
+          "(modified|changed|edited|updated) (after|since) (the )?(test )?(run|failure|execution)",
+          "mismatch",
+          "no longer matches",
+          "differs from",
+          "does not match the (artifacts|snippet|run)",
+          "newer than"
+        ]
+      },
+      {
+        "id": "historical-text",
+        "description": "Names what the run actually asserted ('My Profile')",
+        "anyOf": [
+          "my profile"
+        ]
+      },
+      {
+        "id": "rerun",
+        "description": "Says a re-run is needed to confirm the current state",
+        "anyOf": [
+          "re-?run",
+          "run (it |the test )?again",
+          "npx playwright test"
+        ]
+      }
+    ],
+    "forbiddenClaims": [
+      {
+        "id": "assumes-current-failure",
+        "description": "Assumes the failure still exists in the current source",
+        "pattern": "(still|currently) (fails|failing|broken)|the current (test|source|code) (fails|is wrong)",
+        "severity": "fail"
+      },
+      {
+        "id": "denies-failure",
+        "description": "Treats the corrected current source as proof that the earlier failure never happened",
+        "pattern": "(the )?(earlier |original |previous |reported )?failure (never|did not|didn't) (happen|occur)|(the test|it) (never|did not|didn't) (actually |really )?fail|(no|nothing) (failure|defect) (occurred|happened)|(is|was) a false (failure|alarm|positive)",
+        "severity": "fail"
+      },
+      {
+        "id": "test-correct",
+        "description": "Reasons from the current source alone that the test is correct",
+        "pattern": "the test (is|looks) correct"
+      },
+      {
+        "id": "blames-app",
+        "description": "Blames the app",
+        "pattern": "(application|app|server|backend) (is )?(broken|down|failing)"
+      }
+    ]
+  },
+  "requiredEvidence": [
+    {
+      "kind": "mcp",
+      "refPattern": "get_failure_details",
+      "why": "Failure data must come from the MCP tools",
+      "provisional": false
+    },
+    {
+      "kind": "source",
+      "refPattern": "^tests/ui/profile\\.spec\\.ts$",
+      "why": "The current source must be compared with the error snippet and its modification time with the run start",
+      "provisional": false
+    }
+  ],
+  "recommendations": {
+    "acceptable": [
+      {
+        "id": "rerun",
+        "description": "Re-run the test to confirm the edited source",
+        "anyOf": [
+          "re-?run",
+          "run (it |the test )?again",
+          "npx playwright test"
+        ]
+      }
+    ],
+    "forbidden": [
+      {
+        "id": "sleep",
+        "description": "Adds a fixed wait",
+        "pattern": "waitForTimeout|\\bsleep\\b"
+      },
+      {
+        "id": "more-time",
+        "description": "Raises timeouts",
+        "pattern": "increase (the )?(test |expect |action |navigation )?timeout"
+      }
+    ]
+  }
+}

@@ -1,0 +1,132 @@
+{
+  "id": "S03",
+  "canary": "TDCANARY-2eb12f14-c4ee-48de-a376-c5feed5019ae",
+  "description": "Synthetic, deterministic race (it always loses; a natural race would pass intermittently). The fixture answers /api/profile correctly after 1.5 s. The test checks the heading with a web-first assertion (static, passes at once), then reads isVisible() for 'Dana Demo' once, which returns false while the page still shows 'Loading your profile…'. The attempt fails in well under a second with Expected true / Received false, not a timeout. The control, the same test with web-first toBeVisible assertions, passes against the same 1.5 s delay, so the app works and the defect is the missing wait.",
+  "failureType": "timing",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [
+      {
+        "title": "shows the signed-in user on the profile page",
+        "file": "tests/ui/profile.spec.ts"
+      }
+    ],
+    "classification": "Test-code defect",
+    "acceptableAlternatives": [],
+    "sourceMismatch": false,
+    "confidence": [
+      "High",
+      "Medium"
+    ]
+  },
+  "rootCause": {
+    "summary": "expect(await locator.isVisible()).toBe(true) checks once, immediately after the heading appears, while /api/profile is still pending; the profile renders later, so a retrying (web-first) assertion would pass.",
+    "criteria": [
+      {
+        "id": "non-retrying",
+        "description": "Identifies the one-shot isVisible() check that does not wait or retry",
+        "anyOf": [
+          "isVisible",
+          "non-?retrying",
+          "(does not|doesn't|never) (wait|retry|re-?check)",
+          "no auto-?wait",
+          "one-?(time|shot)",
+          "only once",
+          "snapshot (of|in) time"
+        ]
+      },
+      {
+        "id": "still-loading",
+        "description": "Connects it to the page still loading the profile",
+        "anyOf": [
+          "loading your profile",
+          "still loading",
+          "not (yet )?(loaded|rendered|arrived)",
+          "before .{0,60}(loaded|arrived|rendered|finished|resolved|completed)",
+          "still pending",
+          "in flight"
+        ]
+      },
+      {
+        "id": "timing",
+        "description": "Calls it a timing / synchronization problem in the test",
+        "anyOf": [
+          "race",
+          "timing",
+          "synchroni[sz]",
+          "too early",
+          "too soon",
+          "premature"
+        ]
+      }
+    ],
+    "forbiddenClaims": [
+      {
+        "id": "blames-backend",
+        "description": "Blames the backend as slow or broken",
+        "pattern": "(backend|server|api|endpoint) (is |was )?(too slow|slow|down|broken|failing|hung)"
+      },
+      {
+        "id": "claims-error",
+        "description": "Claims the API returned an error",
+        "pattern": "(returned|responded with) (a |an )?(5\\d\\d|4\\d\\d|error)"
+      },
+      {
+        "id": "claims-timeout",
+        "description": "Describes the failure as a timeout",
+        "pattern": "(test|assertion|expect) (timed out|timeout)|timeout (of|exceeded)"
+      }
+    ]
+  },
+  "requiredEvidence": [
+    {
+      "kind": "mcp",
+      "refPattern": "get_failure_details",
+      "why": "Failure data must come from the MCP tools",
+      "provisional": false
+    },
+    {
+      "kind": "source",
+      "refPattern": "^tests/ui/profile\\.spec\\.ts$",
+      "why": "The one-shot isVisible() check is in the test source",
+      "provisional": false
+    },
+    {
+      "kind": "error_context",
+      "refPattern": "^test-results/.+/error-context\\.md$",
+      "why": "Confirmed (Playwright 1.64.1): the page snapshot at failure shows the paragraph \"Loading your profile…\" and no profile details",
+      "provisional": false
+    }
+  ],
+  "recommendations": {
+    "acceptable": [
+      {
+        "id": "web-first",
+        "description": "Use a retrying web-first assertion",
+        "anyOf": [
+          "await expect\\(.{0,80}\\)\\.(toBeVisible|toHaveText|toContainText)",
+          "web-first",
+          "auto-?(wait|retr)",
+          "retrying assertion"
+        ]
+      }
+    ],
+    "forbidden": [
+      {
+        "id": "sleep",
+        "description": "Adds a fixed wait",
+        "pattern": "waitForTimeout|\\bsleep\\b"
+      },
+      {
+        "id": "more-time",
+        "description": "Raises timeouts",
+        "pattern": "increase (the )?(test |expect |action |navigation )?timeout"
+      },
+      {
+        "id": "retries",
+        "description": "Hides the failure with retries",
+        "pattern": "add (a )?retr(y|ies)|increase (the )?retries|enable retries"
+      }
+    ]
+  }
+}

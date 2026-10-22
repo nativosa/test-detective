@@ -1,0 +1,98 @@
+{
+  "id": "S06",
+  "canary": "TDCANARY-32712ea0-69e9-41da-b7c9-b2e0117e98ae",
+  "description": "Synthetic, deterministic. Nothing listens at the configured base URL (the generator released the port before the run), so page.goto fails with net::ERR_CONNECTION_REFUSED. The test never reached the app; the screenshot is blank and error-context has no page snapshot.",
+  "failureType": "environment",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [
+      {
+        "title": "shows the signed-in user on the profile page",
+        "file": "tests/ui/profile.spec.ts"
+      }
+    ],
+    "classification": "Environment issue",
+    "acceptableAlternatives": [],
+    "sourceMismatch": false,
+    "confidence": [
+      "High",
+      "Medium"
+    ]
+  },
+  "rootCause": {
+    "summary": "page.goto could not connect: the server at the base URL was not running (connection refused), so no page loaded.",
+    "criteria": [
+      {
+        "id": "refused",
+        "description": "Identifies the refused connection",
+        "anyOf": [
+          "connection refused",
+          "ERR_CONNECTION_REFUSED",
+          "econnrefused"
+        ]
+      },
+      {
+        "id": "not-running",
+        "description": "Says the app/server was not reachable at the base URL",
+        "anyOf": [
+          "(not|wasn't|was not|isn't) (running|reachable|listening|up|started|available)",
+          "unreachable",
+          "no server",
+          "(could|can)(not|n't) (connect|reach)",
+          "nothing (is )?listening",
+          "base ?url"
+        ]
+      }
+    ],
+    "forbiddenClaims": [
+      {
+        "id": "blames-locator",
+        "description": "Blames the test's locators or expectations",
+        "pattern": "(locator|selector) (is )?(wrong|incorrect)|wrong (expected )?text"
+      },
+      {
+        "id": "claims-app-error",
+        "description": "Claims the app returned an error response",
+        "pattern": "(returned|responded with) (a |an )?(5\\d\\d|4\\d\\d|error)"
+      }
+    ]
+  },
+  "requiredEvidence": [
+    {
+      "kind": "mcp",
+      "refPattern": "get_failure_details",
+      "why": "Failure data must come from the MCP tools",
+      "provisional": false
+    }
+  ],
+  "recommendations": {
+    "acceptable": [
+      {
+        "id": "start-server",
+        "description": "Start, check or configure the app server / base URL",
+        "anyOf": [
+          "(start|restart|launch|run|check|verify) .{0,40}(server|app|application|service)",
+          "base ?url",
+          "webServer"
+        ]
+      }
+    ],
+    "forbidden": [
+      {
+        "id": "sleep",
+        "description": "Adds a fixed wait",
+        "pattern": "waitForTimeout|\\bsleep\\b"
+      },
+      {
+        "id": "retries",
+        "description": "Hides the failure with retries",
+        "pattern": "add (a )?retr(y|ies)|increase (the )?retries|enable retries"
+      },
+      {
+        "id": "edit-test",
+        "description": "Changes the test code",
+        "pattern": "(change|edit|fix|update) (the )?(test|locator|selector|assertion)s?\\b"
+      }
+    ]
+  }
+}

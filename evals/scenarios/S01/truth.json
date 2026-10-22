@@ -1,0 +1,131 @@
+{
+  "id": "S01",
+  "canary": "TDCANARY-c6fc3a64-0952-40c8-9d4b-10b4aef9dcca",
+  "description": "Synthetic, deterministic. The test expects the profile page's h1 to read 'My Profile', but the page's heading is 'Profile' (its <title> is 'Profile · Acme Portal' too). The app is consistent with itself; the expected text in the test is wrong. A control with toHaveText('Profile') passes against the same app.",
+  "failureType": "incorrect_assertion",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [
+      {
+        "title": "shows the profile heading",
+        "file": "tests/ui/profile.spec.ts"
+      }
+    ],
+    "classification": "Test-code defect",
+    "acceptableAlternatives": [],
+    "reviewableAlternatives": [
+      {
+        "classification": "Application defect",
+        "note": "Defensible only if a requirement says the heading should read 'My Profile'; the artifacts don't show one, so a person must judge it",
+        "requires": {
+          "id": "requirements-ambiguity",
+          "description": "Grounds the alternative in an explicit requirements ambiguity (which heading text is intended)",
+          "anyOf": [
+            "requirement",
+            "specification",
+            "intended (heading|text|title|wording)",
+            "ambigu",
+            "which (text|heading|title) is (correct|intended|expected)",
+            "product (decision|owner)",
+            "design (spec|decision)"
+          ]
+        }
+      }
+    ],
+    "sourceMismatch": false,
+    "confidence": [
+      "High",
+      "Medium"
+    ]
+  },
+  "rootCause": {
+    "summary": "toHaveText('My Profile') on the h1 fails: the element is found, but its text is 'Profile', which is what the app correctly renders.",
+    "criteria": [
+      {
+        "id": "expected-text",
+        "description": "Names the test's expected text 'My Profile'",
+        "anyOf": [
+          "my profile"
+        ]
+      },
+      {
+        "id": "actual-text",
+        "description": "Names the heading's actual text 'Profile'",
+        "anyOf": [
+          "received:? ?['\"]profile['\"]",
+          "['\"]profile['\"]",
+          "\\bprofile\\b heading",
+          "heading \"?profile"
+        ]
+      },
+      {
+        "id": "text-mismatch",
+        "description": "Says the expected text does not match the rendered text",
+        "anyOf": [
+          "toHaveText",
+          "expected text",
+          "text (does not|doesn't) match",
+          "mismatch",
+          "wrong (expected )?text",
+          "expectation"
+        ]
+      }
+    ],
+    "forbiddenClaims": [
+      {
+        "id": "heading-missing",
+        "description": "Claims the heading is missing",
+        "pattern": "heading (is )?(missing|absent|not rendered|not found)"
+      },
+      {
+        "id": "app-broken",
+        "description": "Claims the page or app is broken",
+        "pattern": "(profile page|application|app|server|backend) (is )?(broken|down|failing)"
+      }
+    ]
+  },
+  "requiredEvidence": [
+    {
+      "kind": "mcp",
+      "refPattern": "get_failure_details",
+      "why": "Failure data must come from the MCP tools",
+      "provisional": false
+    },
+    {
+      "kind": "source",
+      "refPattern": "^tests/ui/profile\\.spec\\.ts$",
+      "why": "The expected text 'My Profile' is in the test source",
+      "provisional": false
+    },
+    {
+      "kind": "error_context",
+      "refPattern": "^test-results/.+/error-context\\.md$",
+      "why": "Confirmed (Playwright 1.64.1): the page snapshot shows heading \"Profile\" [level=1]",
+      "provisional": false
+    }
+  ],
+  "recommendations": {
+    "acceptable": [
+      {
+        "id": "expect-profile",
+        "description": "Expect the real heading text 'Profile'",
+        "anyOf": [
+          "toHaveText\\(['\"]profile['\"]\\)",
+          "['\"]profile['\"]"
+        ]
+      }
+    ],
+    "forbidden": [
+      {
+        "id": "sleep",
+        "description": "Adds a fixed wait",
+        "pattern": "waitForTimeout|\\bsleep\\b"
+      },
+      {
+        "id": "more-time",
+        "description": "Raises timeouts",
+        "pattern": "increase (the )?(test |expect |action |navigation )?timeout"
+      }
+    ]
+  }
+}
