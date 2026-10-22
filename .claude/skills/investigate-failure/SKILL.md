@@ -73,6 +73,14 @@ Read these directly at the repo-relative paths from Step 2. The MCP tools only r
    - `unzip -p <trace.zip> '*.network' | grep -E '"status":\s*[45][0-9]{2}|"failure"' | head -n 20` shows HTTP errors and failed requests.
    - `unzip -p <trace.zip> '*.network' | grep -oE '"url":"[^"]*"|"_wasFulfilled":true' | head -n 40` shows which requests the test answered itself (`"_wasFulfilled":true` follows the mocked request's URL).
 
+   **Run these commands exactly as written**, replacing only `<trace.zip>` with the trace `path` from Step 2. Each command is a separate Bash call. Only `unzip`, `grep` and `head` are permitted, and a call that contains anything else is denied as a whole. Never add shell variables or assignments (`T=…`, `$T`), `;`, `&&`, `||`, `echo`, `cut`, redirections or any other command, and never combine several of these commands into one call.
+
+   **If a trace command is denied**, retry once: run the documented command for the evidence you need, alone and exactly as written. If you are unsure which one, use `unzip -l <trace.zip>`. Do not try other variations. Report the trace as not available only if that retry also fails.
+
+   **Report only what succeeded.** Trace contents count as inspected only if a command that returned them succeeded. Never describe trace contents you didn't obtain that way. Keep these two cases apart:
+   - **Missing**: Step 2 reported no trace, or `exists` is `false` or `location` isn't `repo`. Report it as ⚠️ not available (missing).
+   - **Present but not inspectable**: the trace exists, but your commands were denied or failed. Report it as ⚠️ not available (exists at `<path>` but could not be inspected) and quote the denial or error. Name the evidence it might have held (for example HTTP status codes, or which requests were mocked), and lower your confidence accordingly.
+
 ## Step 4: Classify
 
 Pick exactly one:

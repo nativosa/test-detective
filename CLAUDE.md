@@ -8,7 +8,7 @@ An AI-assisted tool that investigates failed Playwright tests. A parallel goal i
 
 ## Current stage: Stage 2.6 — expanding evaluation coverage (consolidation awaiting review)
 
-Stage 2.5 (agent evaluation framework and three-scenario pilot benchmark) is complete. Stage 2.6.1 added seven scenarios (S01, S03, S06–S10), their fixture modes, generation options, observation checks, control runs and offline snapshots. Stage 2.6.2 added scorer version 6 (flaky outcome, unavailable evidence, reviewable alternatives, definitive claims, no-failure reports) and its golden tests; the pilot results are unchanged under v6. S08, S07, S03 and S09 then ran live once each (S07 not accepted; the others accepted, S08 and S09 after manual review). Scorer version 7 (verification steps, denied access) is implemented and checked on copies; the saved runs are still at v5/v6. Any further live run, or a rescore of saved runs, needs explicit approval.
+Stage 2.5 (agent evaluation framework and three-scenario pilot benchmark) is complete. Stage 2.6.1 added seven scenarios (S01, S03, S06–S10), their fixture modes, generation options, observation checks, control runs and offline snapshots. Stage 2.6.2 added scorer version 6 (flaky outcome, unavailable evidence, reviewable alternatives, definitive claims, no-failure reports) and its golden tests; the pilot results are unchanged under v6. S08, S07, S03 and S09 then ran live once each (S07 not accepted; the others accepted, S08 and S09 after manual review). The Skill's trace step was made permission-safe after S07, so S03 and S09 ran with a different Skill. Scorer version 7 (verification steps, denied access) is implemented and checked on copies; the saved runs are still at v5/v6. Any further live run, or a rescore of saved runs, needs explicit approval.
 
 In scope: the Playwright suite, its config and reporting, the `investigate-failure` Skill, the `failure-investigator` Subagent, the read-only MCP server in `src/mcp/`, the read-only Agent SDK CLI in `src/agent/`, the evaluation dataset in `evals/` and `src/eval/`, and docs.
 
@@ -70,6 +70,8 @@ Local runs use no retries, so flaky failures surface instead of being hidden. CI
 | `investigate-failure` | `/investigate-failure [test title or spec]` | Read-only root-cause report for failed tests, built from the MCP tools and the artifact contract above |
 
 Skills live in `.claude/skills/<name>/SKILL.md`. `investigate-failure` must stay read-only: it never edits files, reruns tests, or contacts external services. If you change the artifact contract, update the Skill too.
+
+The Skill's trace commands must stay plain pipelines of the CLI's allowlisted Bash commands (`unzip`, `grep`, `head`), each run as its own call, with one retry after a denial. `src/agent/test/skill.test.ts` checks this against `ALLOWED_TOOLS`. If you change either the commands or the allowlist, keep the two in sync and record the new Skill hash in `evals/README.md` ("Skill versions").
 
 When classifying, the Skill treats an HTTP error the test mocked itself (`page.route` / `route.fulfill`, or `"_wasFulfilled":true` in the trace) as a test-code defect, not an application defect. Keep that rule if you edit its classification step.
 

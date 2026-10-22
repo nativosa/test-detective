@@ -263,6 +263,15 @@ Both commands are offline: they read saved files, the current `truth.json` files
 
 A finished session must record `snapshot`, `workspace` and `configDifferences`.
 
+### Skill versions
+
+`preflight.skillSha256` identifies the Skill a run used. Compare results only between runs that share it.
+
+| SHA-256 of `SKILL.md` | Runs | Change |
+|---|---|---|
+| `995a548c3447290899291ae14a3b0306d14ae85be4e0d2b974307fc7695d476d` | pilot S02, S04, S05; Stage 2.6 S08, S07 | — |
+| `ed2a523b32e9e652f54942a9b13db9d2c45bad39a1954c2a9ca13bb92e7863b9` | Stage 2.6 S03, S09 | Permission-safe trace inspection: trace commands run exactly as written, one per Bash call, with no compound syntax; one retry with a documented command after a denial; a missing trace is reported separately from one that is present but couldn't be inspected. Triggered by the S07 run, where one compound command was denied and never retried. |
+
 ### Ground truth versions
 
 Every `score.json` records `inputs.truthSha256`, the hash of the `truth.json` bytes it was scored against, along with the result, transcript and snapshot identities and `scorerVersion`. `score` compares each fresh score with the stored one. If any would change (truth edited, scorer version bumped, saved inputs changed), it **writes nothing** and lists the evaluations and reasons, including what the change does to the category and the audit verdict. `--rescore` replaces them deliberately: each old file is first archived to `<evalId>/score-history/score.v<scorer>.truth-<sha12>.<sha8>.json` (never overwritten). Reviews refer to the score they judged by hash, so after a rescore they are kept unchanged in `review.json` and reported as stale. The summary lists the truth hashes used per scenario and warns when a run mixes versions.
