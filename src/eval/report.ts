@@ -15,8 +15,12 @@ import { CONFIDENCE_LEVELS } from './truth.ts';
 // Human review never edits score.json. A review is applied on top of the automatic verdict, and
 // the summary reports both: `automatic` (score files only) and `reviewed` (with reviews applied).
 
-/** Checks a reviewer may decide; the others are exact comparisons that review cannot change. */
-export const REVIEWABLE_CHECKS = ['coverage', 'root_cause', 'evidence_validity', 'evidence_sufficiency', 'citations', 'recommendation'] as const satisfies readonly CheckId[];
+/**
+ * Checks a reviewer may decide; the others are exact comparisons that review cannot change.
+ * `classification` only for a reviewable alternative: a reviewer decides whether that alternative
+ * is defensible. An exact, incorrect or abstained verdict is never changed by review.
+ */
+export const REVIEWABLE_CHECKS = ['coverage', 'classification', 'root_cause', 'evidence_validity', 'evidence_sufficiency', 'citations', 'recommendation'] as const satisfies readonly CheckId[];
 
 const Review = z.strictObject({
   evalId: z.string().regex(/^S\d{2}-\d{2}$/),
@@ -73,11 +77,18 @@ const Metrics = z.strictObject({
       unsupported: z.number().int(),
       confirmedFalse: z.number().int(),
       falseUnavailable: z.number().int(),
+      accessDenied: z.number().int().describe('"Not available" claims about a file the permission system denied (scorer v7)'),
     }),
     requiredVerified: Fraction,
-    citations: z.strictObject({ verified: z.number().int(), unresolved: z.number().int(), unsupported: z.number().int(), confirmedFalse: z.number().int() }),
+    requiredAccessDenied: z.number().int().describe('Required evidence never obtained because every read was denied (scorer v7)'),
+    citations: z.strictObject({ verified: z.number().int(), unresolved: z.number().int(), unsupported: z.number().int(), confirmedFalse: z.number().int(), accessDenied: z.number().int() }),
   }),
-  rootCause: z.strictObject({ passed: Fraction, criteriaMatched: Fraction, forbiddenHits: z.number().int() }),
+  rootCause: z.strictObject({
+    passed: Fraction,
+    criteriaMatched: Fraction,
+    forbiddenHits: z.number().int().describe('Suspicious claims sent to review'),
+    definitiveClaims: z.number().int().describe('Unhedged forbidden claims that failed the check (severity "fail")'),
+  }),
   recommendation: z.strictObject({ passed: Fraction, acceptableMatched: Fraction, forbiddenHits: z.number().int() }),
 });
 export type Metrics = z.infer<typeof Metrics>;
@@ -109,7 +120,23 @@ export const Summary = z.strictObject({
   automatic: Metrics,
   reviewed: Metrics.nullable().describe('With human reviews applied; null when no review was applied'),
   highConfidenceIncorrect: z.array(z.strictObject({ evalId: z.string(), test: z.string(), predicted: z.string(), expected: z.string() })),
+  byFailureType: z
+    .array(
+      z.strictObject({
+        failureType: z.string(),
+        evaluations: z.number().int(),
+        eligible: z.number().int(),
+        investigations: z.number().int(),
+        exact: z.number().int(),
+        reviewableAlternative: z.number().int(),
+        accepted: z.number().int(),
+      }),
+    )
+    .describe('Automatic results grouped by the scenario failure type ("unknown" for scores before version 6); counts only'),
   truthVersions: z.array(z.strictObject({ scenarioId: z.string(), truthSha256: z.array(z.string()), consistent: z.boolean() })),
+  skillVersions: z
+    .array(z.strictObject({ skillSha256: z.string().nullable(), evaluations: z.array(z.string()) }))
+    .describe('Investigator Skill (outcome.json preflight.skillSha256) per evaluation; null = not recorded. More than one is flagged'),
   usage: z.strictObject({
     note: z.string(),
     wallClockMs: Stat,
@@ -135,18 +162,34 @@ export const Summary = z.strictObject({
       evalId: z.string(),
       runId: z.string(),
       scenarioId: z.string(),
+      failureType: z.string().nullable(),
       scorerVersion: z.number().int(),
       truthSha256: z.string().nullable(),
+      skillSha256: z.string().nullable().describe('The Skill the session ran with (outcome.json preflight); null = not recorded'),
       snapshotFingerprint: z.string().nullable(),
       usage: Usage.describe("This evaluation's metrics from score.json"),
       auditCounts: z.strictObject({ violations: z.number().int(), suspicious: z.number().int(), dismissed: z.number().int() }),
       automaticCategory: z.enum(CATEGORIES),
       reviewedCategory: z.enum(CATEGORIES),
       expected: z.string().nullable(),
-      tests: z.array(z.strictObject({ title: z.string(), predicted: z.string().nullable(), confidence: z.string().nullable(), verdict: z.string(), highConfidenceIncorrect: z.boolean() })),
+      tests: z.array(
+        z.strictObject({
+          title: z.string(),
+          outcome: z.string().nullable().describe('Observed MCP outcome (unexpected, flaky)'),
+          predicted: z.string().nullable(),
+          confidence: z.string().nullable(),
+          verdict: z.string(),
+          highConfidenceIncorrect: z.boolean(),
+        }),
+      ),
       acceptance: z.strictObject({ automatic: z.enum(ACCEPTANCE_STATUSES), reviewed: z.enum(ACCEPTANCE_STATUSES), blockers: z.array(z.string()), pending: z.array(z.string()) }),
       checks: z.record(z.string(), z.strictObject({ automatic: z.enum(CHECK_STATUSES), reviewed: z.enum(CHECK_STATUSES) })),
-      review: z.strictObject({ status: z.enum(['none', 'applied', 'stale', 'partly_rejected']), reviewer: z.string().nullable(), notes: z.array(z.string()) }),
+      review: z.strictObject({
+        status: z.enum(['none', 'applied', 'stale', 'partly_rejected']),
+        reviewer: z.string().nullable(),
+        reviewedAt: z.string().nullable(),
+        notes: z.array(z.string()),
+      }),
       reasons: z.array(z.string()),
       reviewReasons: z.array(z.string()),
       auditVerdict: z.string(),
@@ -183,10 +226,16 @@ export function applyReview(record: ScoreRecord, scoreSha256: string, review: Re
   const notes: string[] = [];
   let rejected = false;
   const eligible = ELIGIBLE_CATEGORIES.includes(record.category);
+  const reviewableVerdict = record.classification.tests.some((t) => t.verdict === 'reviewable_alternative');
   for (const [id, decision] of Object.entries(review.checks) as [CheckId, { status: CheckStatus; note: string }][]) {
     if (!eligible) {
       rejected = true;
       notes.push(`${id}: not applied, a ${record.category} evaluation is not scored`);
+      continue;
+    }
+    if (id === 'classification' && !reviewableVerdict) {
+      rejected = true;
+      notes.push('classification: not applied, review decides only a reviewable alternative');
       continue;
     }
     checks[id] = decision.status;
@@ -220,7 +269,8 @@ export function applyReview(record: ScoreRecord, scoreSha256: string, review: Re
 // Aggregation
 
 /** `runId`: the run the score file belongs to; defaults to the manifest's (a single run). */
-export type Scored = { record: ScoreRecord; sha256: string; runId?: string };
+/** `skillSha256`: outcome.json preflight.skillSha256 (null or absent = not recorded). */
+export type Scored = { record: ScoreRecord; sha256: string; runId?: string; skillSha256?: string | null };
 type View = { record: ScoreRecord; category: Category; checks: Record<CheckId, CheckStatus>; acceptance: ScoreRecord['acceptance'] };
 
 /** `manifest` names the summary; for a combined report it is synthesized by runs.ts reportCombined. */
@@ -257,15 +307,19 @@ export function aggregate(manifest: RunManifest, scores: Scored[], reviews: Revi
     highConfidenceIncorrect: reviewedViews
       .filter((v) => ELIGIBLE_CATEGORIES.includes(v.category))
       .flatMap((v) => v.record.classification.tests.filter((t) => t.highConfidenceIncorrect).map((t) => ({ evalId: v.record.evalId, test: t.title, predicted: t.predicted!, expected: v.record.classification.expected! }))),
+    byFailureType: byFailureType(automaticViews),
     truthVersions: truthVersions(scores.map((s) => s.record)),
+    skillVersions: skillVersions(scores),
     usage: usage(scores.map((s) => s.record)),
     reliability: reliability(reviewedViews),
     evaluations: views.map(({ record, reviewed }, i) => ({
       evalId: record.evalId,
       runId: runOf(scores[i]!),
       scenarioId: record.scenarioId,
+      failureType: record.failureType,
       scorerVersion: record.scorerVersion,
       truthSha256: record.inputs.truthSha256,
+      skillSha256: scores[i]!.skillSha256 ?? null,
       snapshotFingerprint: record.inputs.snapshotFingerprint,
       usage: {
         wallClockMs: record.metrics.wallClockMs,
@@ -280,10 +334,10 @@ export function aggregate(manifest: RunManifest, scores: Scored[], reviews: Revi
       automaticCategory: record.category,
       reviewedCategory: reviewed.category,
       expected: record.classification.expected,
-      tests: record.classification.tests.map((t) => ({ title: t.title, predicted: t.predicted, confidence: t.confidence, verdict: t.verdict, highConfidenceIncorrect: t.highConfidenceIncorrect })),
+      tests: record.classification.tests.map((t) => ({ title: t.title, outcome: t.outcome, predicted: t.predicted, confidence: t.confidence, verdict: t.verdict, highConfidenceIncorrect: t.highConfidenceIncorrect })),
       acceptance: { automatic: record.acceptance.status, reviewed: reviewed.acceptance.status, blockers: reviewed.acceptance.blockers, pending: reviewed.acceptance.pending },
       checks: Object.fromEntries(record.checks.map((c) => [c.id, { automatic: c.status, reviewed: reviewed.checks[c.id] }])),
-      review: { status: reviewed.status, reviewer: byId.get(record.evalId)?.reviewer ?? null, notes: reviewed.notes },
+      review: { status: reviewed.status, reviewer: byId.get(record.evalId)?.reviewer ?? null, reviewedAt: byId.get(record.evalId)?.reviewedAt ?? null, notes: reviewed.notes },
       reasons: record.reasons,
       reviewReasons: record.review.reasons,
       auditVerdict: record.audit.verdict,
@@ -339,7 +393,8 @@ function metrics(views: View[]): Metrics {
 
   const items = (id: CheckId) => eligible.flatMap((v) => v.record.checks.find((c) => c.id === id)?.items ?? []);
   const tagCount = (id: CheckId, tag: string) => items(id).filter((i) => i.tag === tag).length;
-  const sufficiency = items('evidence_sufficiency').filter((i) => i.detail !== 'no investigation');
+  // Required evidence only; acknowledgements of unavailable evidence are not requirements met.
+  const sufficiency = items('evidence_sufficiency').filter((i) => i.detail !== 'no investigation' && !i.id.startsWith('unavailable:'));
   const criteria = items('root_cause').filter((i) => i.tag === 'criterion');
   const acceptable = items('recommendation').filter((i) => i.tag === 'acceptable');
   const passed = (id: CheckId) => ({ count: eligible.filter((v) => v.checks[id] === 'pass').length, of: n });
@@ -362,16 +417,24 @@ function metrics(views: View[]): Metrics {
         unsupported: tagCount('evidence_validity', 'unsupported'),
         confirmedFalse: tagCount('evidence_validity', 'confirmed_false'),
         falseUnavailable: tagCount('evidence_validity', 'false_unavailable'),
+        accessDenied: tagCount('evidence_validity', 'access_denied'),
       },
       requiredVerified: { count: sufficiency.filter((i) => i.status === 'pass').length, of: sufficiency.length },
+      requiredAccessDenied: sufficiency.filter((i) => i.tag === 'access_denied').length,
       citations: {
         verified: tagCount('citations', 'verified'),
         unresolved: tagCount('citations', 'unresolved'),
         unsupported: tagCount('citations', 'unsupported'),
         confirmedFalse: tagCount('citations', 'confirmed_false'),
+        accessDenied: tagCount('citations', 'access_denied'),
       },
     },
-    rootCause: { passed: passed('root_cause'), criteriaMatched: { count: criteria.filter((i) => i.status === 'pass').length, of: criteria.length }, forbiddenHits: tagCount('root_cause', 'forbidden') },
+    rootCause: {
+      passed: passed('root_cause'),
+      criteriaMatched: { count: criteria.filter((i) => i.status === 'pass').length, of: criteria.length },
+      forbiddenHits: tagCount('root_cause', 'forbidden'),
+      definitiveClaims: tagCount('root_cause', 'forbidden_definitive'),
+    },
     recommendation: {
       passed: passed('recommendation'),
       acceptableMatched: { count: acceptable.filter((i) => i.status === 'pass').length, of: acceptable.length },
@@ -395,6 +458,24 @@ function usage(records: ScoreRecord[]): Summary['usage'] {
     estimatedUsageCostUsd: stat((m) => m.estimatedUsageCostUsd),
     toolCalls: stat((m) => m.toolCalls),
   };
+}
+
+function byFailureType(views: View[]): Summary['byFailureType'] {
+  const types = [...new Set(views.map((v) => v.record.failureType ?? 'unknown'))].sort();
+  return types.map((failureType) => {
+    const mine = views.filter((v) => (v.record.failureType ?? 'unknown') === failureType);
+    const eligible = mine.filter((v) => ELIGIBLE_CATEGORIES.includes(v.category));
+    const tests = eligible.flatMap((v) => v.record.classification.tests);
+    return {
+      failureType,
+      evaluations: mine.length,
+      eligible: eligible.length,
+      investigations: tests.length,
+      exact: tests.filter((t) => t.verdict === 'exact').length,
+      reviewableAlternative: tests.filter((t) => t.verdict === 'reviewable_alternative').length,
+      accepted: eligible.filter((v) => v.acceptance.status === 'accepted').length,
+    };
+  });
 }
 
 /** Per scenario and test: predicted classifications across eligible attempts. Multi-test scenarios keep one row per test. */
@@ -426,6 +507,11 @@ function reliabilityWarning(records: ScoreRecord[]): string {
     (single ? 'Each scenario was run once, so a result shows what happened in that one session, not how often the agent gets it right. ' : '') +
     'This sample is insufficient to establish statistical reliability: no rates, confidence intervals or run-to-run variance can be inferred from it.'
   );
+}
+
+function skillVersions(scores: Scored[]): Summary['skillVersions'] {
+  const hashes = [...new Set(scores.map((s) => s.skillSha256 ?? null))].sort((a, b) => (a ?? '').localeCompare(b ?? ''));
+  return hashes.map((skillSha256) => ({ skillSha256, evaluations: scores.filter((s) => (s.skillSha256 ?? null) === skillSha256).map((s) => s.record.evalId) }));
 }
 
 function truthVersions(records: ScoreRecord[]): Summary['truthVersions'] {
@@ -470,16 +556,22 @@ export function renderSummary(summary: Summary): string {
   );
   const inconsistent = summary.truthVersions.filter((t) => !t.consistent);
   if (inconsistent.length > 0) out.push(`> **Warning:** scores computed against different truth.json versions: ${inconsistent.map((t) => t.scenarioId).join(', ')}.`, '');
+  if (summary.skillVersions.length > 1) {
+    out.push(
+      `> **The investigator Skill differs between evaluations:** ${summary.skillVersions.map((v) => `${v.skillSha256?.slice(0, 12) ?? 'not recorded'} (${v.evaluations.join(', ')})`).join('; ')}. Results from different Skill versions are not like-for-like.`,
+      '',
+    );
+  }
   out.push('## Outcomes', '', '| Category | Automatic | Reviewed |', '|---|---|---|', ...CATEGORIES.map((c) => `| ${LABEL[c]} | ${a.categories[c]} | ${summary.reviewed ? summary.reviewed.categories[c] : '–'} |`), '');
 
   const block = (m: Metrics) => [
     `- **Classification agreement:** exact ${frac(m.classification.exact)} eligible investigations` +
-      ` (acceptable alternative ${m.classification.verdicts.acceptable_alternative}, incorrect ${m.classification.verdicts.incorrect}, abstained ${m.classification.verdicts.abstained}, missing ${m.classification.verdicts.missing}; ${m.classification.pendingReview} still pending review)`,
+      ` (acceptable alternative ${m.classification.verdicts.acceptable_alternative}, reviewable alternative ${m.classification.verdicts.reviewable_alternative}, incorrect ${m.classification.verdicts.incorrect}, abstained ${m.classification.verdicts.abstained}, missing ${m.classification.verdicts.missing}; ${m.classification.pendingReview} still pending review)`,
     `- **High-confidence incorrect:** ${m.classification.highConfidenceIncorrect}`,
     `- **Fully accepted diagnoses:** ${frac(m.acceptance.accepted)} eligible runs (pending review ${m.acceptance.statuses.pending_review}, not accepted ${m.acceptance.statuses.not_accepted})`,
-    `- Root cause check passed ${frac(m.rootCause.passed)} (criteria matched ${frac(m.rootCause.criteriaMatched)}, suspicious claims ${m.rootCause.forbiddenHits}); recommendation passed ${frac(m.recommendation.passed)} (suspicious ${m.recommendation.forbiddenHits})`,
-    `- Evidence claims: verified ${m.evidence.claims.verified}, unresolved provenance ${m.evidence.claims.unresolved}, unsupported ${m.evidence.claims.unsupported}, confirmed false ${m.evidence.claims.confirmedFalse}, false "not available" ${m.evidence.claims.falseUnavailable}; required evidence verified ${frac(m.evidence.requiredVerified)}`,
-    `- Citations: verified ${m.evidence.citations.verified}, unresolved ${m.evidence.citations.unresolved}, unsupported ${m.evidence.citations.unsupported}, confirmed false ${m.evidence.citations.confirmedFalse}`,
+    `- Root cause check passed ${frac(m.rootCause.passed)} (criteria matched ${frac(m.rootCause.criteriaMatched)}, suspicious claims ${m.rootCause.forbiddenHits}, unsupported definitive claims ${m.rootCause.definitiveClaims}); recommendation passed ${frac(m.recommendation.passed)} (suspicious ${m.recommendation.forbiddenHits})`,
+    `- Evidence claims: verified ${m.evidence.claims.verified}, unresolved provenance ${m.evidence.claims.unresolved}, unsupported ${m.evidence.claims.unsupported}, confirmed false ${m.evidence.claims.confirmedFalse}, false "not available" ${m.evidence.claims.falseUnavailable}, access denied ${m.evidence.claims.accessDenied}; required evidence verified ${frac(m.evidence.requiredVerified)} (access denied ${m.evidence.requiredAccessDenied})`,
+    `- Citations: verified ${m.evidence.citations.verified}, unresolved ${m.evidence.citations.unresolved}, unsupported ${m.evidence.citations.unsupported}, confirmed false ${m.evidence.citations.confirmedFalse}, access denied ${m.evidence.citations.accessDenied}`,
   ];
   out.push('## Diagnostic metrics (eligible runs only)', '', '**Automatic:**', ...block(a), '');
   if (summary.reviewed) out.push(`**After human review** (${summary.reviews.applied} review(s) applied):`, ...block(summary.reviewed), '');
@@ -487,6 +579,14 @@ export function renderSummary(summary: Summary): string {
     out.push('**High-confidence incorrect diagnoses:**', ...summary.highConfidenceIncorrect.map((h) => `- ${h.evalId} "${h.test}": ${h.predicted} at High confidence (expected ${h.expected})`), '');
   }
 
+  out.push(
+    '## By failure type (automatic)',
+    '',
+    '| Failure type | Evaluations | Eligible | Investigations | Exact | Reviewable alternative | Fully accepted |',
+    '|---|---|---|---|---|---|---|',
+    ...summary.byFailureType.map((t) => `| ${t.failureType} | ${t.evaluations} | ${t.eligible} | ${t.investigations} | ${t.exact} | ${t.reviewableAlternative} | ${t.accepted} |`),
+    '',
+  );
   out.push('## Classification confusion matrix (automatic, eligible investigations)', '');
   const cols = [...CLASSIFICATIONS, 'none'];
   out.push(`| Expected \\ Predicted | ${cols.join(' | ')} |`, `|---|${cols.map(() => '---').join('|')}|`);
@@ -498,12 +598,19 @@ export function renderSummary(summary: Summary): string {
   out.push('', '## Checks (automatic, eligible runs)', '', `| Check | ${CHECK_STATUSES.join(' | ')} |`, `|---|${CHECK_STATUSES.map(() => '---').join('|')}|`);
   for (const id of CHECK_IDS) out.push(`| ${id} | ${CHECK_STATUSES.map((s) => a.checks[id]![s]).join(' | ')} |`);
 
-  out.push('', '## Evaluations', '', '| Evaluation | Category (auto → reviewed) | Classification per test | Acceptance (auto → reviewed) | Audit |', '|---|---|---|---|---|');
+  out.push(
+    '',
+    '## Evaluations',
+    '',
+    '| Evaluation | Failure type | Category (auto → reviewed) | Classification per test (observed outcome) | Acceptance (auto → reviewed) | Audit |',
+    '|---|---|---|---|---|---|',
+  );
   for (const e of summary.evaluations) {
     const cat = e.automaticCategory === e.reviewedCategory ? LABEL[e.automaticCategory] : `${LABEL[e.automaticCategory]} → ${LABEL[e.reviewedCategory]}`;
-    const tests = e.tests.map((t) => `${t.predicted ?? 'none'} (${t.verdict}${t.highConfidenceIncorrect ? ', HIGH-CONFIDENCE INCORRECT' : ''})`).join('; ') || '–';
+    const tests =
+      e.tests.map((t) => `${t.predicted ?? 'none'} (${t.verdict}${t.highConfidenceIncorrect ? ', HIGH-CONFIDENCE INCORRECT' : ''}${t.outcome ? `; ${t.outcome}` : ''})`).join('; ') || '–';
     const acc = e.acceptance.automatic === e.acceptance.reviewed ? e.acceptance.automatic : `${e.acceptance.automatic} → ${e.acceptance.reviewed}`;
-    out.push(`| ${e.evalId} | ${cat} | ${tests} | ${acc} | ${e.auditVerdict} |`);
+    out.push(`| ${e.evalId} | ${e.failureType ?? '–'} | ${cat} | ${tests} | ${acc} | ${e.auditVerdict} |`);
   }
   for (const e of summary.evaluations) {
     out.push('', `### ${e.evalId}: ${LABEL[e.reviewedCategory]}`, '');
@@ -519,7 +626,9 @@ export function renderSummary(summary: Summary): string {
     if (e.auditDismissed.length > 0) out.push('', '**Dismissed audit findings (no access possible):**', ...e.auditDismissed.map((x) => `- ${x}`));
     if (e.cleanup.status === 'failed') out.push('', `**Infrastructure: workspace NOT removed** (${e.cleanup.error ?? 'no detail'}). Scoring is unaffected; remove it once no process uses it.`);
     else if (e.cleanup.status === 'removed_after_retry') out.push('', `Infrastructure: workspace removed after ${e.cleanup.retried} retried attempt(s) (busy while the session processes exited).`);
-    if (e.review.status !== 'none') out.push('', `**Human review (${e.review.status}${e.review.reviewer ? `, ${e.review.reviewer}` : ''}):**`, ...e.review.notes.map((n) => `- ${n}`));
+    if (e.review.status !== 'none') {
+      out.push('', `**Human review (${e.review.status}${e.review.reviewer ? `, ${e.review.reviewer}` : ''}${e.review.reviewedAt ? `, ${e.review.reviewedAt}` : ''}):**`, ...e.review.notes.map((n) => `- ${n}`));
+    }
   }
 
   const cleanup = Object.entries(summary.infrastructure.cleanup);
@@ -535,14 +644,14 @@ export function renderSummary(summary: Summary): string {
     '',
     '## Provenance and usage per evaluation',
     '',
-    '| Evaluation | Run | Scorer | Truth sha256 | Snapshot | Duration (s) | Wall clock (s) | Turns | Tokens in / out | Tool calls | Est. cost (USD) | Audit (violations / suspicious / dismissed) | Cleanup |',
-    '|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+    '| Evaluation | Run | Scorer | Truth sha256 | Skill sha256 | Snapshot | Duration (s) | Wall clock (s) | Turns | Tokens in / out | Tool calls | Est. cost (USD) | Audit (violations / suspicious / dismissed) | Cleanup |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
   );
   for (const e of summary.evaluations) {
     const u = e.usage;
     const secs = (ms: number) => (ms / 1000).toFixed(1);
     out.push(
-      `| ${e.evalId} | ${e.runId} | v${e.scorerVersion} | ${e.truthSha256?.slice(0, 12) ?? '–'} | ${e.snapshotFingerprint ?? '–'} | ${v(u.durationMs, secs)} | ${v(u.wallClockMs, secs)} | ${v(u.numTurns)} | ${v(u.inputTokens)} / ${v(u.outputTokens)} | ${v(u.toolCalls)} | ${v(u.estimatedUsageCostUsd, (c) => c.toFixed(4))} | ${e.auditVerdict} (${e.auditCounts.violations} / ${e.auditCounts.suspicious} / ${e.auditCounts.dismissed}) | ${e.cleanup.status.replaceAll('_', ' ')} |`,
+      `| ${e.evalId} | ${e.runId} | v${e.scorerVersion} | ${e.truthSha256?.slice(0, 12) ?? '–'} | ${e.skillSha256?.slice(0, 12) ?? 'not recorded'} | ${e.snapshotFingerprint ?? '–'} | ${v(u.durationMs, secs)} | ${v(u.wallClockMs, secs)} | ${v(u.numTurns)} | ${v(u.inputTokens)} / ${v(u.outputTokens)} | ${v(u.toolCalls)} | ${v(u.estimatedUsageCostUsd, (c) => c.toFixed(4))} | ${e.auditVerdict} (${e.auditCounts.violations} / ${e.auditCounts.suspicious} / ${e.auditCounts.dismissed}) | ${e.cleanup.status.replaceAll('_', ' ')} |`,
     );
   }
 

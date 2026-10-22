@@ -98,11 +98,11 @@ describe('aggregation', () => {
   test('classification agreement counts eligible investigations, with verdict categories and pending reviews kept apart', () => {
     const c = summary.automatic.classification;
     assert.equal(c.investigations, 10);
-    assert.deepEqual(c.verdicts, { exact: 8, acceptable_alternative: 0, incorrect: 1, abstained: 1, missing: 0 });
+    assert.deepEqual(c.verdicts, { exact: 8, acceptable_alternative: 0, reviewable_alternative: 0, incorrect: 1, abstained: 1, missing: 0 });
     assert.deepEqual(c.exact, { count: 8, of: 10 });
     assert.equal(c.pendingReview, 5);
     assert.ok(!('credit' in c));
-    assert.match(markdown, /\*\*Classification agreement:\*\* exact 8\/10 eligible investigations \(acceptable alternative 0, incorrect 1, abstained 1, missing 0; 5 still pending review\)/);
+    assert.match(markdown, /\*\*Classification agreement:\*\* exact 8\/10 eligible investigations \(acceptable alternative 0, reviewable alternative 0, incorrect 1, abstained 1, missing 0; 5 still pending review\)/);
   });
 
   test('fully accepted diagnosis rate is a separate metric', () => {
@@ -140,6 +140,26 @@ describe('aggregation', () => {
     const other = { ...b.record, inputs: { ...b.record.inputs, truthSha256: 'f'.repeat(64) } };
     const mixed = aggregate(await loadRunManifest(runDir), [{ record: a.record, sha256: a.sha }, { record: other, sha256: b.sha }], null);
     assert.equal(mixed.truthVersions[0]!.consistent, false);
+  });
+
+  test('the Skill each session ran with comes from outcome.json, and different Skills are flagged', async () => {
+    const recorded = summary.evaluations.filter((e) => e.skillSha256 !== null);
+    assert.ok(recorded.length > 0 && recorded.every((e) => /^[0-9a-f]{64}$/.test(e.skillSha256!)));
+    assert.deepEqual(summary.skillVersions.flatMap((v) => v.evaluations).sort(), summary.evaluations.map((e) => e.evalId).sort());
+    const a = await scoreFile(runDir, ids.correct!);
+    const b = await scoreFile(runDir, ids.wrongRootCause!);
+    const mixed = aggregate(await loadRunManifest(runDir), [{ record: a.record, sha256: a.sha, skillSha256: 'a'.repeat(64) }, { record: b.record, sha256: b.sha, skillSha256: 'b'.repeat(64) }], null);
+    assert.deepEqual(mixed.skillVersions.map((v) => [v.skillSha256?.slice(0, 1), v.evaluations]), [['a', [a.record.evalId]], ['b', [b.record.evalId]]]);
+    const md = renderSummary(mixed);
+    assert.match(md, /The investigator Skill differs between evaluations:\*\* aaaaaaaaaaaa \(.+\); bbbbbbbbbbbb/);
+    assert.match(md, /\| aaaaaaaaaaaa \|/);
+  });
+
+  test('review provenance: reviewer and date are shown next to the reviewed outcome', async () => {
+    const a = await scoreFile(runDir, ids.correct!);
+    const reviewed = aggregate(await loadRunManifest(runDir), [{ record: a.record, sha256: a.sha }], { formatVersion: 1, reviews: [review(a.record.evalId, a.sha, { note: 'checked' })] });
+    assert.deepEqual([reviewed.evaluations[0]!.review.reviewer, reviewed.evaluations[0]!.review.reviewedAt], ['reviewer-1', '2026-10-21']);
+    assert.match(renderSummary(reviewed), /\*\*Human review \(applied, reviewer-1, 2026-10-21\):\*\*/);
   });
 
   test('reliability keeps one row per scenario test', () => {
@@ -225,7 +245,8 @@ describe('human review', () => {
 
   test('the review schema rejects non-reviewable checks and duplicate reviews', () => {
     const ok = review('S02-01', 'a'.repeat(64));
-    assert.equal(ReviewFile.safeParse({ formatVersion: 1, reviews: [{ ...ok, checks: { classification: { status: 'pass', note: 'x' } } }] }).success, false);
+    assert.equal(ReviewFile.safeParse({ formatVersion: 1, reviews: [{ ...ok, checks: { confidence: { status: 'pass', note: 'x' } } }] }).success, false);
+    assert.equal(ReviewFile.safeParse({ formatVersion: 1, reviews: [{ ...ok, checks: { source_mismatch: { status: 'pass', note: 'x' } } }] }).success, false);
     assert.equal(ReviewFile.safeParse({ formatVersion: 1, reviews: [ok, ok] }).success, false);
     assert.equal(ReviewFile.safeParse({ formatVersion: 1, reviews: [ok] }).success, true);
   });
@@ -287,7 +308,7 @@ describe('combined report over several runs', () => {
     assert.deepEqual(new Set(s.evaluations.map((e) => e.runId)), new Set(['part-a', 'part-b']));
     assert.deepEqual(s.scorerVersions, [SCORER_VERSION]);
     assert.match(md, /^Combined from 2 runs: part-a \(.*\); part-b \(.*\)\. Each run's own files are unchanged\.$/m);
-    assert.match(md, /^\| Evaluation \| Run \| Scorer \| Truth sha256 \| Snapshot \| Duration \(s\) \|/m);
+    assert.match(md, /^\| Evaluation \| Run \| Scorer \| Truth sha256 \| Skill sha256 \| Snapshot \| Duration \(s\) \|/m);
     const again = await reportCombined([a, b], out);
     assert.equal(again.markdown, md, 'deterministic, and a previous combined summary may be replaced');
   });

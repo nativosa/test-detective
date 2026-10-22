@@ -61,12 +61,12 @@ export type Variant = { name: string; about: string; session: (f: Facts) => Sess
 // ---------------------------------------------------------------------------
 // Building blocks
 
-const sessionInit = (f: Facts, overrides: Parameters<typeof init>[0] = {}) => ({ ...init(overrides), cwd: f.root }) as unknown as SDKMessage;
-const list = (f: Facts, id = 'list-1') => call(id, MCP_LIST, {}, f.list);
-const details = (f: Facts, id = 'details-1') => call(id, MCP_DETAILS, { testId: f.testId }, f.details);
-const readSpec = (f: Facts) => call('read-spec', 'Read', { file_path: path.join(f.root, ...f.spec.split('/')) }, f.specText);
+export const sessionInit = (f: Facts, overrides: Parameters<typeof init>[0] = {}) => ({ ...init(overrides), cwd: f.root }) as unknown as SDKMessage;
+export const list = (f: Facts, id = 'list-1') => call(id, MCP_LIST, {}, f.list);
+export const details = (f: Facts, id = 'details-1') => call(id, MCP_DETAILS, { testId: f.testId }, f.details);
+export const readSpec = (f: Facts) => call('read-spec', 'Read', { file_path: path.join(f.root, ...f.spec.split('/')) }, f.specText);
 const readErrorContext = (f: Facts) => call('read-ctx', 'Read', { file_path: f.errorContext }, '- button "Log in"');
-const investigated = (...investigations: ModelInvestigation[]) => success(report('investigated', investigations, 'Investigated one failed test.'));
+export const investigated = (...investigations: ModelInvestigation[]) => success(report('investigated', investigations, 'Investigated one failed test.'));
 
 /** A correct, well-evidenced S02 diagnosis. Variants derive from it. */
 export function correctInvestigation(f: Facts): ModelInvestigation {
@@ -330,7 +330,9 @@ export async function writeRunManifest(runDir: string, runId: string): Promise<v
 export async function factsFor(root: string): Promise<Facts> {
   const loaded = await loadReport(root);
   const listed = listFailures(loaded);
-  const failure = listed.failures[0]!;
+  const failure = listed.failures[0];
+  // A report without failures (S10): only the root and the list exist; nothing else may be used.
+  if (!failure) return { root, list: listed, details: undefined as never, testId: '', spec: '', specText: '', errorContext: '', screenshot: undefined, trace: undefined };
   const detail = await getFailureDetails(loaded, failure.testId);
   const attachment = (name: string) => detail.attempts[0]?.attachments.find((a) => a.name === name && a.exists)?.path ?? undefined;
   return {

@@ -4,6 +4,7 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod';
 import { leakMarkers } from './isolation.ts';
 import { aggregate, renderSummary, ReviewFile, Summary } from './report.ts';
+import type { Scored } from './report.ts';
 import { readJson, ScenarioId, SCENARIOS_DIR, scenarioDir, TRUTH_FILE } from './scenarios.ts';
 import { ScoreRecord, scoreEvaluation } from './score.ts';
 import type { Raw, SnapshotInfo, TruthInput } from './score.ts';
@@ -403,11 +404,11 @@ function isWithin(parent: string, child: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-async function loadScoredRun(runDir: string): Promise<{ manifest: RunManifest; scores: { record: ScoreRecord; sha256: string }[]; reviews: ReviewFile | null }> {
+async function loadScoredRun(runDir: string): Promise<{ manifest: RunManifest; scores: Scored[]; reviews: ReviewFile | null }> {
   const manifest = await loadRunManifest(runDir);
   const evalIds = await listEvaluations(runDir);
   if (evalIds.length === 0) throw new Error(`${runDir} contains no evaluation directories (named like S02-01).`);
-  const scores: { record: ScoreRecord; sha256: string }[] = [];
+  const scores: Scored[] = [];
   for (const evalId of evalIds) {
     const file = path.join(runDir, evalId, SCORE_FILE);
     if (!(await exists(file))) throw new Error(`${evalId} has no ${SCORE_FILE}; run "npm run eval -- score --run ${runDir}" first.`);
@@ -415,7 +416,7 @@ async function loadScoredRun(runDir: string): Promise<{ manifest: RunManifest; s
     const parsed = ScoreRecord.safeParse(JSON.parse(text));
     if (!parsed.success) throw new Error(`${file} is invalid:\n${z.prettifyError(parsed.error)}`);
     if (parsed.data.evalId !== evalId) throw new Error(`${file} belongs to ${parsed.data.evalId}, not ${evalId}.`);
-    scores.push({ record: parsed.data, sha256: sha256(text) });
+    scores.push({ record: parsed.data, sha256: sha256(text), skillSha256: await recordedSkill(path.join(runDir, evalId, OUTCOME_FILE)) });
   }
   let reviews: ReviewFile | null = null;
   const reviewFile = path.join(runDir, REVIEW_FILE);
@@ -425,6 +426,14 @@ async function loadScoredRun(runDir: string): Promise<{ manifest: RunManifest; s
     reviews = parsed.data;
   }
   return { manifest, scores, reviews };
+}
+
+/** The Skill hash the harness captured before the session, or null if outcome.json does not record one. */
+async function recordedSkill(file: string): Promise<string | null> {
+  const raw = parseJsonRaw(await readRaw(file));
+  if (raw.state !== 'ok') return null;
+  const parsed = RunOutcome.safeParse(raw.value);
+  return parsed.success ? parsed.data.preflight.skillSha256 : null;
 }
 
 export function serialize(value: unknown): string {

@@ -46,7 +46,7 @@ describe('classification verdicts (no partial credit)', () => {
     assert.equal(r.category, 'scored', r.reasons.join('; '));
     assert.deepEqual(r.classification, {
       expected: 'Test-code defect',
-      tests: [{ title: 'signs in with valid credentials', file: 'tests/ui/login.spec.ts', testId: only(r).testId, predicted: 'Test-code defect', confidence: 'High', verdict: 'exact', highConfidenceIncorrect: false }],
+      tests: [{ title: 'signs in with valid credentials', file: 'tests/ui/login.spec.ts', testId: only(r).testId, predicted: 'Test-code defect', confidence: 'High', verdict: 'exact', highConfidenceIncorrect: false, outcome: 'unexpected' }],
     });
     assert.ok(!('credit' in r.classification));
     for (const c of r.checks) assert.equal(c.status, 'pass', `${c.id}: ${c.detail}`);
