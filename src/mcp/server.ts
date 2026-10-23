@@ -23,8 +23,8 @@ export const TRACE_TOOL = 'get_trace_summary';
 export type ServerOptions = {
   repoRoot: string;
   /**
-   * Registers get_trace_summary. Off by default until Stage 3.3 allows it in investigation
-   * sessions: main.ts enables it only with --enable-trace-summary, which the Agent SDK CLI does not pass.
+   * Registers get_trace_summary. Off by default: main.ts enables it only with --enable-trace-summary,
+   * which the investigation launchers pass (.mcp.json, the Agent SDK CLI, the eval workspace).
    */
   enableTraceSummary?: boolean;
   traceLimits?: TraceLimits;

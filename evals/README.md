@@ -1,8 +1,8 @@
-# Evaluation dataset (Stages 2.5–2.6)
+# Evaluation dataset (Stages 2.5–3.5)
 
 Controlled Playwright failures with ground truth, used to measure how accurately, reliably and cheaply test-detective diagnoses failures. This stage evaluates the existing investigation (the `investigate-failure` Skill run by the Agent SDK CLI) as the baseline. It adds no investigation features.
 
-**Status: 2.6.1.** Stage 2.5 built the schemas, the fixture app, three pilot scenarios (S02, S04, S05), snapshot generation and storage, investigation workspaces with isolation checks, offline scoring and reporting, the live adapter, and a one-run-per-scenario pilot benchmark. Stage 2.6.1 adds seven scenarios (S01, S03, S06–S10) aimed at timing, environment, flaky, inconclusive, source-mismatch and no-failure cases, plus the fixture modes, generation options, observation checks and control runs they need. Their snapshots are generated offline; none has been run live yet. Stage 2.6.2 added scorer version 6 for them (see "Scorer version 6" below). Four of them (S08, S07, S03, S09) were then run live once each; scorer version 7 followed from what those runs exposed (see "Scorer version 7").
+**Status: Stage 3.6 (retrospective).** Stage 2.5 built the schemas, the fixture app, three pilot scenarios (S02, S04, S05), snapshot generation and storage, investigation workspaces with isolation checks, offline scoring and reporting, the live adapter, and a one-run-per-scenario pilot benchmark. Stage 2.6.1 adds seven scenarios (S01, S03, S06–S10) aimed at timing, environment, flaky, inconclusive, source-mismatch and no-failure cases, plus the fixture modes, generation options, observation checks and control runs they need. Their snapshots are generated offline. Stage 2.6.2 added scorer version 6 for them (see "Scorer version 6" below). Four of them (S08, S07, S03, S09) were then run live once each; scorer version 7 followed from what those runs exposed (see "Scorer version 7"). Stage 3 added structured trace evidence (`get_trace_summary`), scorer version 8 and one more live run each of S07, S05 and S04 (see "Stage 3.5 live runs").
 
 ## Layout
 
@@ -223,6 +223,13 @@ npm run eval -- live --scenario S02 --max-budget-usd 0.50 [--max-turns 30] [--ti
 - **Afterwards:** `checkIntegrity` on the workspace, and the repo state (root `artifacts/results.json`, `test-results/`, `playwright-report/`, `git status`) compared with before. Then the workspace is removed (bounded, see "Bounded cleanup on Windows"), and `cleanup` records whether that worked and how many attempts it took. `outcome.json` and `result.json` are written even after failures, then the run is scored and reported offline. A scoring problem (e.g. a stored score conflict) never loses the saved run.
 - **Labels.** Only the real SDK produces `source: "live"`. A run made with an injected (fake) query is labelled `scorer_validation`, and attempts of different sources can't be mixed in one run.
 - **Usage.** Tokens, turns, duration, the SDK-estimated cost and permission denials come from the session's `result.json` (`usage`, `observed.permissionDenials`).
+- **Exit status.** `eval live` exits 0 when the session finished and was scored, 1 otherwise, 2 for a refused or invalid invocation, and 130 after Ctrl+C. The saved run directory (`outcome.json`, `score.json`) is the record either way. Don't truncate the output with a pipe: in Windows PowerShell, `… | Select-Object -First N` stops the pipeline early (the Stage 3.5 S04 run reported exit 255 that way, after its files were already written), and `2>&1` on a native command wraps stderr lines in `NativeCommandError` records. Run it plain and read `$LASTEXITCODE`, or keep a full log through `cmd`, whose redirection doesn't touch the exit code:
+
+  ```powershell
+  cmd /c "npm run eval -- live --scenario S04 --max-budget-usd 0.50 > live.log 2>&1"; $LASTEXITCODE
+  ```
+
+  In Git Bash, `npm run eval -- live … 2>&1 | tee live.log; echo "${PIPESTATUS[0]}"` keeps both (plain `$?` is `tee`'s status). Both forms were checked with a refused invocation (exit 2, no session).
 
 ## Saved runs (input to `score` and `report`)
 
@@ -271,7 +278,7 @@ A finished session must record `snapshot`, `workspace` and `configDifferences`.
 |---|---|---|
 | `995a548c3447290899291ae14a3b0306d14ae85be4e0d2b974307fc7695d476d` | pilot S02, S04, S05; Stage 2.6 S08, S07 | — |
 | `ed2a523b32e9e652f54942a9b13db9d2c45bad39a1954c2a9ca13bb92e7863b9` | Stage 2.6 S03, S09 | Permission-safe trace inspection: trace commands run exactly as written, one per Bash call, with no compound syntax; one retry with a documented command after a denial; a missing trace is reported separately from one that is present but couldn't be inspected. Triggered by the S07 run, where one compound command was denied and never retried. |
-| `bb6a78c5e277cfe5fb34bc6990d7fc5d7d00f870c62aa6fff2fedaa1042580c4` | none yet | Stage 3.3: trace facts come from `get_trace_summary` (called for flaky attempts, network, navigation, loading/error/blank states and test-vs-application questions, per retry index), with status-specific handling (`ok`, `partial` = unlisted is unknown, `missing`, `unsupported`). Bash trace commands are a fallback for an unavailable, failed or unsupported summary. Classification no longer treats `_wasFulfilled` as test-created: route markers and status codes never decide alone; identifier-based fetch links, status changes, correlations, timing and coverage do. Analysis points are labelled observed, inference or uncertain. Scorer v8 (Stage 3.4) grades its trace evidence. |
+| `bb6a78c5e277cfe5fb34bc6990d7fc5d7d00f870c62aa6fff2fedaa1042580c4` | Stage 3.5 S07, S05, S04 | Stage 3.3: trace facts come from `get_trace_summary` (called for flaky attempts, network, navigation, loading/error/blank states and test-vs-application questions, per retry index), with status-specific handling (`ok`, `partial` = unlisted is unknown, `missing`, `unsupported`). Bash trace commands are a fallback for an unavailable, failed or unsupported summary. Classification no longer treats `_wasFulfilled` as test-created: route markers and status codes never decide alone; identifier-based fetch links, status changes, correlations, timing and coverage do. Analysis points are labelled observed, inference or uncertain. Scorer v8 (Stage 3.4) grades its trace evidence. |
 
 ### Ground truth versions
 
@@ -397,6 +404,40 @@ Recognizes `get_trace_summary` (Stage 3.2/3.3) as a source of trace evidence and
 
 **Known limits.** Claim extraction is regex-based. A paraphrased claim outside the listed shapes is not checked (not a pass, no item). A sentence with several paths and statuses is only checked for values that match none. The fulfill-to-request correlation is the tool's time window, so `trace_consistency` never ties a fulfillment to a request itself. Required observations exist only in test fixtures so far.
 
+### Stage 3.5 live runs
+
+One live session each of S07, S05 and S04 with Skill `bb6a78c5`, MCP server 0.2.0, scorer v8, `claude-opus-5-5`, SDK 0.3.302 and subscription auth, run from commit `d479526`. The earlier runs of the same scenarios used Skill `995a548c` and are stored at scorer v5/v6, so the two columns differ in Skill and scorer version: compare them as single sessions, not as like-for-like measurements.
+
+| Scenario | Run | Classification (verdict) | Trace evidence | Denials / audit (violations/suspicious/dismissed) | Automatic acceptance | Reviewed acceptance | Turns / duration / SDK-estimated cost |
+|---|---|---|---|---|---|---|---|
+| S07 (flaky backend 500) | `live-S07-20261022T064416Z` | Application defect, Medium (exact) | not obtained (compound Bash command denied, not retried) | 1 / 0/0/0 | not accepted (evidence validity, sufficiency, citations fail) | not accepted | 11 / 31.4 s / $0.152 |
+| | `live-S07-20261023T181747Z` | Application defect, High (exact) | `get_trace_summary` retry 0 `ok` | 0 / 0/0/0 | pending review (`trace_consistency`) | accepted | 11 / 53.6 s / $0.274 |
+| S05 (test-mocked 500) | `live-S05-20261021T211540Z` | Test-code defect, High (exact) | Bash `unzip -p … \| grep` | 0 / 0/0/0 | accepted | accepted | 10 / 27.7 s / $0.124 |
+| | `live-S05-20261023T191300Z` | Test-code defect, High (exact) | `get_trace_summary` retry 0 `ok` | 0 / 0/0/0 | pending review (`root_cause`) | accepted | 11 / 27.9 s / $0.178 |
+| S04 (backend 500) | `live-S04-20261021T210049Z` | Application defect, High (exact) | Bash `unzip -p … \| grep` (after one denied call) | 1 / 0/0/3 | accepted | accepted | 12 / 55.6 s / $0.167 |
+| | `live-S04-20261023T191659Z` | Application defect, High (exact) | `get_trace_summary` retry 0 `ok` | 0 / 0/0/0 | accepted | accepted | 12 / 43.2 s / $0.222 |
+
+Costs are the SDK's estimate at list prices, not charges. Every Stage 3.5 workspace was removed after bounded EBUSY retries (infrastructure only).
+
+- **What changed.** Each new session obtained complete trace evidence through the tool, with no denials and no Bash fallback. The old S05 run decided "test-created" from `_wasFulfilled:true` alone, which the Stage 3.3 Skill no longer allows; the new one combined the route handler's source (no `route.fetch()`), the unlinked fulfillment and zero backend fetches in a complete trace. The new S07 run is the first accepted S07.
+- **Why two runs needed review.** Both were scorer pattern gaps, not diagnostic errors. S07: analysis point 5 ("the trace does not show why the backend returned 500") matched the `trace_consistency` fetched-status shape, which compares against `backendFetches` (API-context fetches only, none here), so it went to review. S04 said "server returned 500" in the same place and produced no item. S05: the `test-mock` root-cause criterion matches `page.route`, `route.fulfill`, mock, stub or intercept; the report said "the test's own route handler answered … with a 500" and "test-injected 500", and "mocks" appeared only in the top-level message, which `root_cause` does not search.
+- **Recurring report issues** (not scored): in all three new reports at least one point labelled Observed ends with a conclusion (S07 point 2, S05 point 2, S04 point 3); S07 and S04 needed a second `StructuredOutput` call after unparseable JSON. That happened in 5 of the 10 saved live runs (S02, S03, S08 as well, across all three Skill versions), and every time the SDK's own validation rejected the call and the model's next call succeeded.
+- **Not a reliability estimate.** Three single sessions on synthetic, deterministic scenarios show what those sessions did. They give no success rate, interval or run-to-run variance.
+
+### Stage 3 retrospective
+
+What Stage 3 (3.2–3.5) changed, and what the three Stage 3.5 sessions do and don't show. Every count below is one session per scenario.
+
+- **Results.** All three Stage 3.5 sessions classified exactly at High confidence. **Automatic** acceptance: S04 only. **Reviewed** acceptance: all three; S07 and S05 each had one check pending review (`trace_consistency`, `root_cause`), both scorer pattern gaps (above), decided by a review. The earlier sessions of the same scenarios were also exact (S07 at Medium); S05 and S04 were accepted automatically and S07 was not accepted.
+- **Structured trace evidence.** In Stage 3.5 every trace was obtained through `get_trace_summary` (retry 0, status `ok`; `traceEvidence.tests[].acquisition: mcp`), with no Bash trace command and no permission denial. The earlier sessions of the same scenarios used Bash pipelines (S05; S04 after one denied call) or obtained nothing (S07, denied and not retried). All three CLI results are `completed` with no consistency issues, so every cited summary was observed in the stream.
+- **Historical comparisons are not like-for-like.** The two sessions of each scenario differ in Skill (`995a548c` → `bb6a78c5`), scorer version (v5/v6 → v8) and date. The seven earlier runs stay at their stored versions; their v8 parity was checked on copies only ("Scorer version 8").
+- **SDK-estimated usage.** Stage 3.5: 34 turns, 124.7 s and $0.674 in total; the earlier sessions of the same scenarios: 33 turns, 114.7 s and $0.443. The dollar figures are the SDK's `total_cost_usd` estimate at list prices; the sessions ran on subscription auth, so they are not charges. The estimate is higher for each Stage 3.5 session than for the earlier one; with one session each, that is an observation, not a measured cost of the change.
+- **Security.** `get_trace_summary` is read-only, takes no path from the client, reads only the requested attempt's whitelisted trace entries through a bounded ZIP layer, and returns only allowlisted, sanitized fields (README, "`get_trace_summary`"). Its path redaction is heuristic: short identifiers and the API structure pass through, so a summary is low-sensitivity, not safe to publish.
+- **Supported trace format.** Only format `version: 10` (Playwright 1.64.1), exercised with Chromium traces only. Any other, missing or mixed version is reported `unsupported` with a reason code, never interpreted as version 10.
+- **Manual-review provenance.** The S07 and S05 reviews were drafted by Claude Code and name it as `reviewer` (see "Human review"). They record a decision, not an authenticated human sign-off.
+- **Exit codes.** The S04 command reported exit 255 because a PowerShell `Select-Object -First` pipe ended it early; the run itself had finished and was saved. `eval live` exits 0/1/2/130 ("Live adapter"); read `$LASTEXITCODE` from an unpiped command.
+- **Scorer v8 stays as it is.** Its known wording limits (the fetched-status claim shape compared only with API-context `backendFetches`; the `test-mock` root-cause vocabulary missing "route handler" phrasing; `root_cause` not searching the top-level `message`) send correct answers to review, never to a wrong pass or fail. A scorer v9 is deferred; any change would be checked for parity on copies first, never tuned to these three runs.
+
 ## Reports (`report.ts`)
 
 `summary.json` (schema `Summary`) and `summary.md` keep two diagnostic metrics apart and never merge them into one number:
@@ -436,6 +477,7 @@ Optional `review.json` in the run directory (schema `ReviewFile` in `report.ts`)
 - Check overrides on runs that aren't eligible (unverified, invalid, …) are rejected and reported.
 - After review, a `needs_review` run becomes `scored` once no `review` check and no open suspicious finding remains, and its acceptance is recomputed from the reviewed statuses.
 - `scoreSha256` ties a review to the exact score it judged. If `score.json` changes (only possible with `--rescore`), the review is reported as **stale** and not applied, and the reviewed score stays in `score-history/`.
+- **Reviewer provenance.** `reviewer` is free text, recorded as written and never authenticated. A review drafted by Claude Code names it as the reviewer (the Stage 3.5 S07 and S05 reviews do); there is no confirmation or sign-off mechanism, so a person's name belongs in `reviewer` only when that person wrote or explicitly adopted the review in the file. Agreement given elsewhere (for example in conversation) is not recorded by the review schema. Reports show the reviewer next to each reviewed result, and the automatic result always stays visible beside it.
 
 ## Scorer-validation fixtures
 

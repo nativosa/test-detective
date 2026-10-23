@@ -11,7 +11,8 @@ const repoRoot = path.resolve(
   process.env.TEST_DETECTIVE_REPO_ROOT || fileURLToPath(new URL('../../', import.meta.url)),
 );
 
-// get_trace_summary is opt-in until Stage 3.3; launchers that don't pass the flag never see it.
+// get_trace_summary is opt-in: the investigation launchers (.mcp.json, the Agent SDK CLI, the eval
+// workspace) pass the flag; a server started without it (npm run mcp) never registers the tool.
 const enableTraceSummary = process.argv.slice(2).includes('--enable-trace-summary');
 
 const handle = serveStdio(() => createServer({ repoRoot, enableTraceSummary }), {
