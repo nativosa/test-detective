@@ -101,9 +101,9 @@ Each attempt's status is listed separately (`failed`, `timedOut`, `passed`…). 
 
 Arguments that don't match the input schema are rejected by the SDK before the tool runs.
 
-### `get_trace_summary` (Stage 3.2)
+### `get_trace_summary` (Stage 3.2; used by investigations since Stage 3.3)
 
-The server registers this tool only when it is started with `--enable-trace-summary` (for example `npx @modelcontextprotocol/inspector node src/mcp/main.ts --enable-trace-summary`). `npm run mcp`, `.mcp.json` and the Agent SDK CLI don't pass it yet, so investigations still see only the two original tools.
+The server registers this tool only when it is started with `--enable-trace-summary` (for example `npx @modelcontextprotocol/inspector node src/mcp/main.ts --enable-trace-summary`). The investigation launchers pass it: `.mcp.json` (interactive sessions, the Skill and the `failure-investigator` Subagent) and the Agent SDK CLI. `npm run mcp` doesn't, so a server started that way has only the two original tools. `src/agent/test/trace-tool.test.ts` pins both, and that every allow list names the same three tools.
 
 **Input and selection.** The input is a `testId` and a `retry`, nothing else; extra arguments such as a path are rejected. The trace is the `trace` attachment of that attempt in the current report, resolved and confined to the repo like every other attachment path. An attempt without a trace (passed under `retain-on-failure`, the first try under `on-first-retry`, `trace: 'off'`) returns `trace.status: "missing"`, not an error.
 
@@ -185,9 +185,9 @@ One SDK session per run. The SDK starts a Claude Code process, which starts our 
 
 1. **Auth preflight before the prompt.** The CLI checks environment variable names, then reads the session's account from SDK initialization (`apiProvider`, `subscriptionType`, `apiKeySource` when reported). The prompt is held back until that preflight passes, and the stream's first message must then confirm `apiKeySource`. See [Authentication and cost](#authentication-and-cost).
 2. **Same procedure as the Subagent.** The prompt asks Claude to invoke the `investigate-failure` Skill, loaded from `.claude/skills` via `settingSources: ['project']`. The Skill's procedure is not copied into the CLI.
-3. **Same MCP server.** Passed explicitly (`node src/mcp/main.ts`, using the Node binary running the CLI) with `strictMcpConfig`, so `.mcp.json`, user MCP config and claude.ai connectors are ignored.
+3. **Same MCP server.** Passed explicitly (`node src/mcp/main.ts --enable-trace-summary`, using the Node binary running the CLI) with `strictMcpConfig`, so `.mcp.json`, user MCP config and claude.ai connectors are ignored.
 4. **Typed result.** The model returns only its analysis as structured output, validated with Zod (`src/agent/result.ts`). The CLI takes test facts (title, file:line, project, outcome, attempts, report fingerprint) from the MCP results it **observed in the stream**, not from the model.
-5. **Consistency checks.** A run is `completed` only if the CLI saw a successful Skill invocation (a `Skill` tool call; a discovered skill or a `Read` of `SKILL.md` doesn't count), a `list_test_failures` result, and a `get_failure_details` result for every testId the model cites, and every failure matching the filter was investigated. Otherwise it is `unverified` (exit 7). A plausible report alone is not accepted.
+5. **Consistency checks.** A run is `completed` only if the CLI saw a successful Skill invocation (a `Skill` tool call; a discovered skill or a `Read` of `SKILL.md` doesn't count), a `list_test_failures` result, and a `get_failure_details` result for every testId the model cites, and every failure matching the filter was investigated. A report that cites `get_trace_summary` needs an observed `ok` or `partial` result for that test from the same report. Otherwise it is `unverified` (exit 7). A plausible report alone is not accepted.
 
 Output is Markdown with observed facts and model analysis in separate sections, or the full result with `--json`. Exit codes: 0 completed (including "no failures"), 2 invalid arguments, 3 auth refused, 4 MCP unavailable or report error, 5 session or model error, 6 timeout or interrupted, 7 invalid or unverified output.
 
@@ -206,7 +206,7 @@ Output is Markdown with observed facts and model analysis in separate sections, 
 These are **runtime restrictions enforced by Claude Code, not an OS sandbox**:
 
 - Only `Read`, `Grep`, `Glob`, `Bash` and `Skill` exist as built-in tools. Edit, Write, NotebookEdit, PowerShell, WebFetch, WebSearch and Agent are removed. `skills: ['investigate-failure']` limits the Skill tool to that one skill: the SDK turns it into a `Skill(investigate-failure)` allow rule and hides every other skill from the listing. It does not add the Skill tool itself. Without `Skill` in `tools`, the skill is discovered but can't be invoked, and the model ends up reading `SKILL.md` as a file (run status `unverified`).
-- `permissionMode: 'dontAsk'` with an exact allowlist: the two test-detective MCP tools and the Skill's read-only Bash patterns (`unzip -l`, `unzip -p`, `grep`, `head`, `ls`). Anything else is denied, not prompted.
+- `permissionMode: 'dontAsk'` with an exact allowlist: the three test-detective MCP tools and the Skill's read-only Bash patterns (`unzip -l`, `unzip -p`, `grep`, `head`, `ls`). Anything else is denied, not prompted.
 - Deny rules for `git`, `npm`, `npx`, `node`, `playwright`, `curl`, `wget` and `rm` apply in every mode.
 - Skill shell injections are disabled, auto memory is off, and the session is not persisted to disk.
 - The CLI compares `git status` before and after the run and warns if anything changed (detection, not prevention).

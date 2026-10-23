@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { describe, test } from 'node:test';
-import { buildPrompt, buildQueryOptions, MCP_DETAILS, MCP_LIST } from '../config.ts';
+import { buildPrompt, buildQueryOptions, MCP_DETAILS, MCP_LIST, MCP_TRACE } from '../config.ts';
 import { args, REPO_ROOT } from './helpers.ts';
 
 const options = (overrides = {}, env: Record<string, string | undefined> = { PATH: 'x' }) =>
@@ -14,7 +14,7 @@ describe('buildQueryOptions: permission surface', () => {
     assert.deepEqual(o.disallowedTools, ['Edit', 'Write', 'NotebookEdit', 'PowerShell', 'WebFetch', 'WebSearch', 'Agent']);
   });
 
-  test('dontAsk with an exact allowlist: two MCP tools and the Skill\'s Bash patterns', () => {
+  test('dontAsk with an exact allowlist: three MCP tools and the Skill\'s Bash patterns', () => {
     const o = options();
     assert.equal(o.permissionMode, 'dontAsk');
     assert.deepEqual(o.allowedTools, [
@@ -23,6 +23,7 @@ describe('buildQueryOptions: permission surface', () => {
       'Glob',
       MCP_LIST,
       MCP_DETAILS,
+      MCP_TRACE,
       'Bash(unzip -l *)',
       'Bash(unzip -p *)',
       'Bash(grep *)',
@@ -53,14 +54,14 @@ describe('buildQueryOptions: permission surface', () => {
     assert.deepEqual(o.skills, ['investigate-failure']);
   });
 
-  test('only our MCP server, started with this Node binary and a repo-derived path', () => {
+  test('only our MCP server, started with this Node binary, a repo-derived path and the trace-summary opt-in', () => {
     const o = options();
     assert.equal(o.strictMcpConfig, true);
     assert.deepEqual(Object.keys(o.mcpServers!), ['test-detective']);
     const server = o.mcpServers!['test-detective'] as { type: string; command: string; args: string[] };
     assert.equal(server.type, 'stdio');
     assert.equal(server.command, process.execPath);
-    assert.deepEqual(server.args, [path.join(REPO_ROOT, 'src', 'mcp', 'main.ts')]);
+    assert.deepEqual(server.args, [path.join(REPO_ROOT, 'src', 'mcp', 'main.ts'), '--enable-trace-summary']);
     assert.equal(o.cwd, REPO_ROOT);
   });
 

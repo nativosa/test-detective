@@ -64,7 +64,7 @@ describe('session options', () => {
     assert.equal(baseline.cwd, REPO_ROOT);
     assert.equal(evaluation.cwd, ctx.workspace.root);
     const server = evaluation.mcpServers![MCP_SERVER] as { command: string; args: string[]; env: Record<string, string> };
-    assert.deepEqual(server.args, [path.join(REPO_ROOT, 'src', 'mcp', 'main.ts')], 'same production server file');
+    assert.deepEqual(server.args, [path.join(REPO_ROOT, 'src', 'mcp', 'main.ts'), '--enable-trace-summary'], 'same production server file and opt-in');
     assert.deepEqual(server.env, { TEST_DETECTIVE_REPO_ROOT: ctx.workspace.root });
   });
 
@@ -86,7 +86,9 @@ describe('session options', () => {
   test('adaptOptions refuses options that do not look like production output', async (t) => {
     const ctx = await context(t);
     const { evaluation } = sessionOptions(args(), ctx, ENV);
-    const production = { ...evaluation, mcpServers: { [MCP_SERVER]: { type: 'stdio' as const, command: process.execPath, args: [path.join(ctx.workspace.root, 'src', 'mcp', 'main.ts')] } } };
+    const production = { ...evaluation, mcpServers: { [MCP_SERVER]: { type: 'stdio' as const, command: process.execPath, args: [path.join(ctx.workspace.root, 'src', 'mcp', 'main.ts'), '--enable-trace-summary'] } } };
+    // A server without the production opt-in is not production output.
+    assert.throws(() => adaptOptions({ ...production, mcpServers: { [MCP_SERVER]: { ...production.mcpServers[MCP_SERVER], args: [path.join(ctx.workspace.root, 'src', 'mcp', 'main.ts')] } } }, ctx), /Unexpected test-detective server config/);
     assert.doesNotThrow(() => adaptOptions(production, ctx));
     assert.throws(() => adaptOptions({ ...production, cwd: REPO_ROOT }, ctx), /Expected cwd/);
     assert.throws(() => adaptOptions({ ...production, strictMcpConfig: false }, ctx), /strictMcpConfig/);

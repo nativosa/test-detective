@@ -3,7 +3,7 @@
     "test-detective": {
       "type": "stdio",
       "command": "node",
-      "args": ["src/mcp/main.ts"]
+      "args": ["src/mcp/main.ts", "--enable-trace-summary"]
     }
   }
 }

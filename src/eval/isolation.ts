@@ -2,7 +2,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { CliArgs } from '../agent/args.ts';
-import { buildQueryOptions, MCP_DETAILS, MCP_LIST, MCP_SERVER, BUILTIN_TOOLS } from '../agent/config.ts';
+import { buildQueryOptions, MCP_DETAILS, MCP_LIST, MCP_SERVER, MCP_TRACE, BUILTIN_TOOLS, TRACE_SUMMARY_FLAG } from '../agent/config.ts';
 import type { QueryFn } from '../agent/run.ts';
 import { listScenarioIds } from './scenarios.ts';
 import { loadGroundTruth } from './truth.ts';
@@ -79,7 +79,8 @@ export function adaptOptions(options: Options, context: IsolationContext): Optio
   const names = Object.keys(servers);
   if (names.length !== 1 || names[0] !== MCP_SERVER) throw new Error(`Expected only the ${MCP_SERVER} MCP server, got ${names.join(', ') || 'none'}.`);
   const server = servers[MCP_SERVER]!;
-  const expectedArgs = [path.join(workspace.root, ...MCP_ENTRY)];
+  // Production passes the trace-summary opt-in (Stage 3.3); the evaluation keeps it, so both sessions see the same tools.
+  const expectedArgs = [path.join(workspace.root, ...MCP_ENTRY), TRACE_SUMMARY_FLAG];
   if (!('command' in server) || (server.type !== undefined && server.type !== 'stdio') || JSON.stringify(server.args) !== JSON.stringify(expectedArgs) || server.env) {
     throw new Error(`Unexpected ${MCP_SERVER} server config; production config.ts may have changed.`);
   }
@@ -89,7 +90,7 @@ export function adaptOptions(options: Options, context: IsolationContext): Optio
   return {
     ...options,
     mcpServers: {
-      [MCP_SERVER]: { type: 'stdio', command: server.command, args: [path.join(repoRoot, ...MCP_ENTRY)], env: { [REPO_ROOT_ENV]: workspace.root } },
+      [MCP_SERVER]: { type: 'stdio', command: server.command, args: [path.join(repoRoot, ...MCP_ENTRY), TRACE_SUMMARY_FLAG], env: { [REPO_ROOT_ENV]: workspace.root } },
     },
     settings: { ...settings, permissions: { ...settings.permissions, deny: [...deny, ...evalDenyRules(workspace.protectedRoots)] } },
   };
@@ -189,7 +190,7 @@ export type AuditContext = { workspace: Pick<Workspace, 'root' | 'protectedRoots
 /** `expected`: recognized SDK-internal tool calls (informational, never a warning). */
 export type TranscriptAudit = { leaked: boolean; leaks: Finding[]; warnings: Finding[]; expected: Finding[]; toolCallsAudited: number };
 
-const ALLOWED_TOOLS = new Set([...BUILTIN_TOOLS, MCP_LIST, MCP_DETAILS]);
+const ALLOWED_TOOLS = new Set([...BUILTIN_TOOLS, MCP_LIST, MCP_DETAILS, MCP_TRACE]);
 
 /**
  * The tool Claude Code adds for `outputFormat: json_schema` (config.ts sets it). It is not in

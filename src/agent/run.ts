@@ -1,12 +1,13 @@
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { Options, Query, SDKMessage, SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { FailureDetailsOutput, ListFailuresOutput } from '../mcp/report.ts';
+import { TraceSummaryOutput } from '../mcp/trace-summary.ts';
 import type { CliArgs } from './args.ts';
 import { authFacts, checkSessionAuth, EXPECTED_API_KEY_SOURCE, preflightAuth } from './auth.ts';
 import type { AuthFacts } from './auth.ts';
-import { buildPrompt, buildQueryOptions, MCP_DETAILS, MCP_LIST, MCP_SERVER, SKILL_NAME, SKILL_TOOL } from './config.ts';
+import { buildPrompt, buildQueryOptions, MCP_DETAILS, MCP_LIST, MCP_SERVER, MCP_TRACE, SKILL_NAME, SKILL_TOOL } from './config.ts';
 import { InvestigationResult, parseModelReport } from './result.ts';
-import type { ModelReport, RunStatus, TestFacts, ToolCall } from './result.ts';
+import type { ModelInvestigation, ModelReport, RunStatus, TestFacts, ToolCall, TraceSummaryFact } from './result.ts';
 
 // Runs one investigation session and turns the SDK message stream into an InvestigationResult.
 // The only seam for tests is `query`: they pass a fake that yields scripted SDK messages.
@@ -115,6 +116,7 @@ class Observations {
   private list: ListFailuresOutput | undefined;
   private listErrorCode: string | undefined;
   private readonly details = new Map<string, FailureDetailsOutput>();
+  private readonly traces: TraceSummaryFact[] = [];
   private readonly notes: string[] = [];
   private readonly args: CliArgs;
   private readonly repoRoot: string;
@@ -195,6 +197,7 @@ class Observations {
     const call = this.calls.find((c) => c.id === id);
     if (!call) return;
     call.outcome = isError ? 'error' : 'ok';
+    if (call.name === MCP_TRACE) return this.recordTrace(call, isError, parseJson(textOf(content)));
     if (call.name !== MCP_LIST && call.name !== MCP_DETAILS) return;
     const json = parseJson(textOf(content));
     if (isError) {
@@ -211,6 +214,39 @@ class Observations {
       if (parsed.success) this.details.set(parsed.data.testId, parsed.data);
       else this.notes.push('Could not parse a get_failure_details result.');
     }
+  }
+
+  /** Keeps a get_trace_summary result's status, validated against the tool's output schema. */
+  private recordTrace(call: Recorded, isError: boolean, json: unknown) {
+    const input = (call.rawInput ?? {}) as { testId?: unknown; retry?: unknown };
+    const testId = typeof input.testId === 'string' ? input.testId : '';
+    const retry = typeof input.retry === 'number' ? input.retry : null;
+    if (isError) {
+      const code = (json as { error?: { code?: unknown } } | undefined)?.error?.code;
+      this.traces.push({ testId, retry, status: 'error', reportFingerprint: null, reasons: typeof code === 'string' ? [code] : [] });
+      return;
+    }
+    const parsed = TraceSummaryOutput.safeParse(json);
+    if (!parsed.success) {
+      this.notes.push('Could not parse a get_trace_summary result.');
+      return;
+    }
+    const { data } = parsed;
+    this.traces.push({ testId: data.testId, retry: data.retry, status: data.trace.status, reportFingerprint: data.reportFingerprint, reasons: data.trace.reasons.map((r) => r.code) });
+  }
+
+  /**
+   * A get_trace_summary citation must rest on a result observed in this session: status ok or
+   * partial, for that testId. Trace claims based on trace commands are graded by the evaluation
+   * scorer (evidence provenance), as before Stage 3.3.
+   */
+  private traceIssues(inv: ModelInvestigation): string[] {
+    const usable = this.traces.some((t) => t.testId === inv.testId && (t.status === 'ok' || t.status === 'partial'));
+    const namesTool = (ref: string | null) => ref !== null && ref.includes('get_trace_summary');
+    // An evidence row that reports the tool's result as not available or skipped is not a citation.
+    const cited = inv.evidence.some((e) => e.status === 'inspected' && namesTool(e.ref)) || inv.analysis.some((a) => a.evidenceRefs.some(namesTool));
+    if (!cited || usable) return [];
+    return [`testId ${inv.testId} cites get_trace_summary, but no get_trace_summary result with trace evidence (status ok or partial) was observed for it.`];
   }
 
   /** Judges a finished session: model output validity plus consistency with what we observed. */
@@ -275,11 +311,18 @@ class Observations {
       return issues;
     }
 
+    const fingerprint = this.list.run.reportFingerprint;
+    for (const t of this.traces) {
+      if (t.reportFingerprint !== null && t.reportFingerprint !== fingerprint) {
+        issues.push(`A get_trace_summary result belongs to report ${t.reportFingerprint}, not the listed report ${fingerprint}.`);
+      }
+    }
     const investigated = new Set<string>();
     for (const inv of report.investigations) {
       const facts = this.factsFor(inv.testId);
       if (!facts) issues.push(`testId ${inv.testId} has no observed successful get_failure_details result.`);
       else investigated.add(facts.file + '\u0000' + facts.title + '\u0000' + facts.project);
+      issues.push(...this.traceIssues(inv));
     }
     for (const f of expected) {
       if (!investigated.has(f.file + '\u0000' + f.title + '\u0000' + f.project)) {
@@ -336,6 +379,7 @@ class Observations {
         skillInvoked: this.skillInvoked(),
         toolCalls: this.calls.map(({ name, input, outcome }) => ({ name, input, outcome })),
         permissionDenials: (r?.permission_denials ?? []).map((d) => ({ tool: d.tool_name, input: summarize(d.tool_input, this.repoRoot) })),
+        traceSummaries: this.traces,
         report: this.list
           ? {
               reportFingerprint: this.list.run.reportFingerprint,

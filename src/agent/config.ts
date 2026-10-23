@@ -10,6 +10,14 @@ export const SKILL_NAME = 'investigate-failure';
 export const MCP_SERVER = 'test-detective';
 export const MCP_LIST = `mcp__${MCP_SERVER}__list_test_failures`;
 export const MCP_DETAILS = `mcp__${MCP_SERVER}__get_failure_details`;
+export const MCP_TRACE = `mcp__${MCP_SERVER}__get_trace_summary`;
+/** The MCP tools investigations may call, in the order the Skill uses them. */
+export const MCP_TOOLS = [MCP_LIST, MCP_DETAILS, MCP_TRACE];
+/**
+ * get_trace_summary is opt-in on the server (src/mcp/main.ts registers it only with this flag).
+ * Investigations pass it since Stage 3.3; a server started without it (npm run mcp) has two tools.
+ */
+export const TRACE_SUMMARY_FLAG = '--enable-trace-summary';
 
 export const SKILL_TOOL = 'Skill';
 
@@ -26,8 +34,7 @@ export const ALLOWED_TOOLS = [
   'Read',
   'Grep',
   'Glob',
-  MCP_LIST,
-  MCP_DETAILS,
+  ...MCP_TOOLS,
   // The investigate-failure Skill's read-only commands, nothing broader.
   'Bash(unzip -l *)',
   'Bash(unzip -p *)',
@@ -62,6 +69,9 @@ Follow the investigate-failure skill exactly, then return its report ONLY as the
   Map the skill's report sections: "Failure summary" -> failureSummary, "Evidence inspected" rows -> evidence,
   "Root-cause analysis" -> classification plus analysis points (cite evidence refs), "Confidence" -> confidence,
   "Proposed fix" -> proposedFix, "Verification steps" -> verificationSteps.
+  Trace facts taken from a get_trace_summary result: evidence kind "trace", ref "get_trace_summary", and name the retry
+  and the trace status in the note; cite "get_trace_summary" in evidenceRefs. Never mark trace evidence inspected
+  unless a get_trace_summary result (status ok or partial) or a trace command actually returned it.
 Do not restate the test title, file, line, project, outcome or attempts: the CLI reads those from the MCP results itself.`;
 
 /**
@@ -109,7 +119,7 @@ export function buildQueryOptions(args: CliArgs, repoRoot: string, abortControll
     // Only our server: ignores .mcp.json, user MCP config and claude.ai connectors.
     strictMcpConfig: true,
     mcpServers: {
-      [MCP_SERVER]: { type: 'stdio', command: process.execPath, args: [path.join(repoRoot, 'src', 'mcp', 'main.ts')] },
+      [MCP_SERVER]: { type: 'stdio', command: process.execPath, args: [path.join(repoRoot, 'src', 'mcp', 'main.ts'), TRACE_SUMMARY_FLAG] },
     },
     tools: BUILTIN_TOOLS,
     skills: [SKILL_NAME],

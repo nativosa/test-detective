@@ -271,6 +271,7 @@ A finished session must record `snapshot`, `workspace` and `configDifferences`.
 |---|---|---|
 | `995a548c3447290899291ae14a3b0306d14ae85be4e0d2b974307fc7695d476d` | pilot S02, S04, S05; Stage 2.6 S08, S07 | — |
 | `ed2a523b32e9e652f54942a9b13db9d2c45bad39a1954c2a9ca13bb92e7863b9` | Stage 2.6 S03, S09 | Permission-safe trace inspection: trace commands run exactly as written, one per Bash call, with no compound syntax; one retry with a documented command after a denial; a missing trace is reported separately from one that is present but couldn't be inspected. Triggered by the S07 run, where one compound command was denied and never retried. |
+| `bb6a78c5e277cfe5fb34bc6990d7fc5d7d00f870c62aa6fff2fedaa1042580c4` | none yet | Stage 3.3: trace facts come from `get_trace_summary` (called for flaky attempts, network, navigation, loading/error/blank states and test-vs-application questions, per retry index), with status-specific handling (`ok`, `partial` = unlisted is unknown, `missing`, `unsupported`). Bash trace commands are a fallback for an unavailable, failed or unsupported summary. Classification no longer treats `_wasFulfilled` as test-created: route markers and status codes never decide alone; identifier-based fetch links, status changes, correlations, timing and coverage do. Analysis points are labelled observed, inference or uncertain. |
 
 ### Ground truth versions
 

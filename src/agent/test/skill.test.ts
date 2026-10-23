@@ -92,10 +92,23 @@ describe('investigate-failure Skill: permission-safe trace inspection', () => {
     assert.match(skill, /^disallowed-tools: Edit, Write, NotebookEdit$/m);
     assert.match(skill, /\*\*Read-only\.\*\* Do not edit files, rerun tests/);
     assert.match(skill, /\*\*Evidence only\.\*\* Every finding must cite an artifact or MCP result you actually obtained/);
-    const order = ['1. **Test source.**', '2. **error-context.md.**', '3. **Screenshot.**', '4. **Trace (only if the above is insufficient).**'];
+    const order = ['1. **Test source.**', '2. **error-context.md.**', '3. **Screenshot.**', '4. **Trace, through `get_trace_summary`.**'];
     const at = order.map((o) => skill.indexOf(o));
     assert.ok(at.every((i, k) => i > 0 && (k === 0 || i > at[k - 1]!)), 'evidence priority order changed');
     for (const c of ['Test-code defect', 'Application defect', 'Environment issue', 'Inconclusive']) assert.match(skill, new RegExp(`- \\*\\*${c}\\*\\*: `));
-    assert.match(skill, /\*\*Mocked responses are not application defects\.\*\*/);
+  });
+
+  test('route markers are observations: the old "_wasFulfilled means mocked" rule is gone', () => {
+    assert.doesNotMatch(skill, /Mocked responses are not application defects/);
+    assert.match(skill, /\*\*A status code or route marker never classifies a failure on its own\.\*\*/);
+    // The fallback grep for _wasFulfilled may stay, but only with the caveat that it can be a fetched response.
+    assert.match(traceStep, /"_wasFulfilled":true.*doesn't say whether the response came from `route\.fetch\(\)`/);
+  });
+
+  test('fallback trace commands are reserved for an unavailable, failed or unsupported trace summary', () => {
+    const fallback = traceStep.slice(traceStep.indexOf('**Fallback trace commands.**'));
+    assert.ok(fallback.length < traceStep.length, 'fallback section not found');
+    assert.equal([...fallback.matchAll(/`(unzip [^`]+)`/g)].length, documented.length, 'every trace command sits in the fallback section');
+    assert.match(fallback, /only when `get_trace_summary` is unavailable, denied or failed, or returned `unsupported`/);
   });
 });

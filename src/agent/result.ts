@@ -67,6 +67,19 @@ const ToolCall = z.strictObject({
 });
 export type ToolCall = z.infer<typeof ToolCall>;
 
+/**
+ * One get_trace_summary result seen in the stream (Stage 3.3). `status` is the tool's trace.status,
+ * or 'error' for an error result. Only the status and reason codes are kept, never trace facts.
+ */
+const TraceSummaryFact = z.strictObject({
+  testId: z.string(),
+  retry: z.number().nullable(),
+  status: z.enum(['ok', 'partial', 'missing', 'unsupported', 'error']),
+  reportFingerprint: z.string().nullable(),
+  reasons: z.array(z.string()).describe('trace.reasons codes, or the error code'),
+});
+export type TraceSummaryFact = z.infer<typeof TraceSummaryFact>;
+
 export const RUN_STATUSES = [
   'completed',
   'unverified',
@@ -115,6 +128,8 @@ export const InvestigationResult = z.strictObject({
     skillInvoked: z.boolean(),
     toolCalls: z.array(ToolCall),
     permissionDenials: z.array(z.strictObject({ tool: z.string(), input: z.string() })),
+    /** Optional so results saved before Stage 3.3 still parse. */
+    traceSummaries: z.array(TraceSummaryFact).optional(),
     report: z
       .strictObject({
         reportFingerprint: z.string(),
@@ -175,6 +190,10 @@ export function renderMarkdown(result: InvestigationResult): string {
         `- **Attempts:** ${attempts || 'none recorded'}`,
         `- **testId:** \`${facts.testId}\``,
       );
+      const traces = (observed.traceSummaries ?? []).filter((t) => t.testId === facts.testId);
+      if (traces.length > 0) {
+        out.push(`- **Trace summaries:** ${traces.map((t) => `retry ${t.retry ?? '?'}: ${t.status}${t.reasons.length ? ` (${t.reasons.join(', ')})` : ''}`).join('; ')}`);
+      }
     } else {
       out.push('- ⚠️ No MCP result for this testId was observed. The analysis below is unverified.');
     }

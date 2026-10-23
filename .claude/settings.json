@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "mcp__test-detective__list_test_failures",
-      "mcp__test-detective__get_failure_details"
+      "mcp__test-detective__get_failure_details",
+      "mcp__test-detective__get_trace_summary"
     ]
   }
 }
