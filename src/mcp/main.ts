@@ -11,10 +11,13 @@ const repoRoot = path.resolve(
   process.env.TEST_DETECTIVE_REPO_ROOT || fileURLToPath(new URL('../../', import.meta.url)),
 );
 
-const handle = serveStdio(() => createServer({ repoRoot }), {
+// get_trace_summary is opt-in until Stage 3.3; launchers that don't pass the flag never see it.
+const enableTraceSummary = process.argv.slice(2).includes('--enable-trace-summary');
+
+const handle = serveStdio(() => createServer({ repoRoot, enableTraceSummary }), {
   onerror: (error) => console.error(`[${SERVER_NAME}] transport error:`, error),
 });
-console.error(`[${SERVER_NAME}] v${SERVER_VERSION} listening on stdio (repo root: ${repoRoot})`);
+console.error(`[${SERVER_NAME}] v${SERVER_VERSION} listening on stdio (repo root: ${repoRoot}${enableTraceSummary ? ', get_trace_summary enabled' : ''})`);
 
 const shutdown = (signal: string) => {
   console.error(`[${SERVER_NAME}] ${signal} received, shutting down`);

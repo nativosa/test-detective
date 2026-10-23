@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { makeRepo, snapshotTree } from './helpers.ts';
+import { ORIGIN, pageTrace, resource, RESULT_DIR, T0, traceReport } from './traces.ts';
 
 // Same command .mcp.json uses, so this exercises the real entry point over real stdio.
 const MAIN = fileURLToPath(new URL('../main.ts', import.meta.url));
@@ -37,6 +38,32 @@ describe('stdio server', () => {
 
     await client.close();
     assert.match(stderr, /listening on stdio/, 'logs go to stderr');
+    assert.deepEqual(await snapshotTree(root), before, 'no files written');
+  });
+
+  test('--enable-trace-summary adds the third tool over real stdio', async (t) => {
+    const trace = `${RESULT_DIR}/trace.zip`;
+    const root = await makeRepo(t, { raw: traceReport([{ status: 'failed', trace }]), files: { [trace]: pageTrace([], [], [resource({ url: `${ORIGIN}/api/profile`, status: 500, start: T0 + 200 })]) } });
+    const before = await snapshotTree(root);
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [...NODE_ARGS, '--enable-trace-summary'],
+      env: { ...getDefaultEnvironment(), TEST_DETECTIVE_REPO_ROOT: root },
+      stderr: 'pipe',
+    });
+    let stderr = '';
+    transport.stderr?.on('data', (chunk) => (stderr += chunk));
+    const client = new Client({ name: 'stdio-test', version: '1.0.0' });
+    await client.connect(transport);
+    const { tools } = await client.listTools();
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), ['get_failure_details', 'get_trace_summary', 'list_test_failures']);
+    const list = await client.callTool({ name: 'list_test_failures', arguments: {} });
+    const testId = (list.structuredContent as { failures: { testId: string }[] }).failures[0]!.testId;
+    const summary = await client.callTool({ name: 'get_trace_summary', arguments: { testId, retry: 0 } });
+    assert.notEqual(summary.isError, true);
+    assert.equal((summary.structuredContent as { trace: { status: string } }).trace.status, 'ok');
+    await client.close();
+    assert.match(stderr, /get_trace_summary enabled/);
     assert.deepEqual(await snapshotTree(root), before, 'no files written');
   });
 

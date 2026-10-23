@@ -5,6 +5,7 @@ import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import type { CallToolResult } from '@modelcontextprotocol/client';
 import { createServer } from '../server.ts';
 import { makeRepo, PNG_BYTES, put, readFixture, snapshotTree } from './helpers.ts';
+import { call, ORIGIN, pageTrace, resource, RESULT_DIR, SPEC_ID, T0, traceReport } from './traces.ts';
 
 const LOGIN_DIR = 'test-results/ui-login-logs-in-with-valid-credentials-chromium';
 
@@ -206,5 +207,87 @@ describe('read-only', () => {
     }
     await client.callTool({ name: 'get_failure_details', arguments: { testId: 'bogus' } });
     assert.deepEqual(await snapshotTree(root), before);
+  });
+});
+
+describe('get_trace_summary over MCP', () => {
+  const TRACE = `${RESULT_DIR}/trace.zip`;
+
+  async function connectTrace(t: TestContext, repoRoot: string): Promise<Client> {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createServer({ repoRoot, enableTraceSummary: true });
+    const client = new Client({ name: 'test-harness', version: '1.0.0' });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    t.after(async () => {
+      await client.close();
+      await server.close();
+    });
+    return client;
+  }
+
+  const trace = () =>
+    pageTrace([{ title: 'Expect "toBeVisible"', method: 'expect', start: T0 + 340, end: T0 + 400, line: 7, error: true }], call('Frame', 'expect', T0 + 345, T0 + 395, { error: true }), [
+      resource({ url: `${ORIGIN}/api/profile`, status: 500, start: T0 + 200 }),
+    ]);
+
+  test('opt-in: absent by default, listed with a strict testId/retry input when enabled', async (t) => {
+    const plain = await connect(t, await makeRepo(t));
+    assert.ok(!(await plain.listTools()).tools.some((tool) => tool.name === 'get_trace_summary'));
+
+    const client = await connectTrace(t, await makeRepo(t));
+    const { tools } = await client.listTools();
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), ['get_failure_details', 'get_trace_summary', 'list_test_failures']);
+    const tool = tools.find((x) => x.name === 'get_trace_summary')!;
+    assert.deepEqual(Object.keys(tool.inputSchema.properties ?? {}).sort(), ['retry', 'testId']);
+    assert.deepEqual([...(tool.inputSchema.required ?? [])].sort(), ['retry', 'testId']);
+    assert.equal(tool.inputSchema.additionalProperties, false);
+    assert.equal(tool.annotations?.readOnlyHint, true);
+    assert.equal(tool.annotations?.openWorldHint, false);
+    assert.match(tool.description ?? '', /does not mean the test created the response/);
+    assert.match(tool.description ?? '', /never\s+classifies/);
+  });
+
+  test('list, details, trace summary: structured and validated against the output schema', async (t) => {
+    const root = await makeRepo(t, { raw: traceReport([{ status: 'failed', trace: TRACE }, { status: 'passed' }]), files: { [TRACE]: trace() } });
+    const before = await snapshotTree(root);
+    const client = await connectTrace(t, root);
+    const { failures } = structured(await client.callTool({ name: 'list_test_failures', arguments: {} }));
+    const testId = failures[0].testId;
+    const summary = structured(await client.callTool({ name: 'get_trace_summary', arguments: { testId, retry: 0 } }));
+    assert.equal(summary.trace.status, 'ok');
+    assert.equal(summary.network.requests[0].status, 500);
+    assert.equal(structured(await client.callTool({ name: 'get_trace_summary', arguments: { testId, retry: 1 } })).trace.status, 'missing');
+    assert.equal(errorCode(await client.callTool({ name: 'get_trace_summary', arguments: { testId, retry: 2 } })), 'ATTEMPT_NOT_FOUND');
+    assert.equal(errorCode(await client.callTool({ name: 'get_trace_summary', arguments: { testId: 'C:\\x\\trace.zip', retry: 0 } })), 'INVALID_TEST_ID');
+    assert.deepEqual(await snapshotTree(root), before);
+  });
+
+  test('input validation rejects paths, extra arguments and bad retries', async (t) => {
+    const client = await connectTrace(t, await makeRepo(t, { raw: traceReport([{ status: 'failed', trace: TRACE }]) }));
+    const id = `${SPEC_ID}@000000000000`;
+    for (const args of [{ testId: id }, { testId: id, retry: -1 }, { testId: id, retry: 1.5 }, { testId: id, retry: '0' }, { testId: id, retry: 100 }, { testId: id, retry: 0, path: 'C:\\Windows\\win.ini' }]) {
+      const result = await client.callTool({ name: 'get_trace_summary', arguments: args as Record<string, unknown> });
+      assert.equal(result.isError, true, JSON.stringify(args));
+      assert.match((result.content[0] as { text: string }).text, /Input validation error/);
+    }
+  });
+
+  test('a hostile archive is a result, and the server keeps answering', async (t) => {
+    const root = await makeRepo(t, { raw: traceReport([{ status: 'failed', trace: TRACE }]), files: { [TRACE]: Buffer.from('PK\u0005\u0006 not really a zip') } });
+    const client = await connectTrace(t, root);
+    const { failures } = structured(await client.callTool({ name: 'list_test_failures', arguments: {} }));
+    const summary = structured(await client.callTool({ name: 'get_trace_summary', arguments: { testId: failures[0].testId, retry: 0 } }));
+    assert.equal(summary.trace.status, 'unsupported');
+    assert.equal(structured(await client.callTool({ name: 'list_test_failures', arguments: {} })).failureCount, 1);
+  });
+
+  test('concurrent calls are serialized and both answered', async (t) => {
+    const root = await makeRepo(t, { raw: traceReport([{ status: 'failed', trace: TRACE }]), files: { [TRACE]: trace() } });
+    const client = await connectTrace(t, root);
+    const { failures } = structured(await client.callTool({ name: 'list_test_failures', arguments: {} }));
+    const args = { testId: failures[0].testId, retry: 0 };
+    const [a, b] = await Promise.all([client.callTool({ name: 'get_trace_summary', arguments: args }), client.callTool({ name: 'get_trace_summary', arguments: args })]);
+    assert.deepEqual(structured(a), structured(b));
   });
 });

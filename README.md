@@ -71,6 +71,7 @@ All artifact folders are git-ignored.
 |---|---|---|
 | `list_test_failures` | none | Run info (start time, duration, Playwright version, report fingerprint), stats, global errors, and every `unexpected` or `flaky` test with its `testId`, title path, file, project, outcome and per-attempt statuses. Returns an empty `failures` list and a message when nothing failed. |
 | `get_failure_details` | `testId` from `list_test_failures` | For one failed or flaky test: location, tags, outcome, configured retries, and per attempt: status, error message, verbatim `Expected…`/`Received…` lines, location, code snippet, trimmed stack, and attachment metadata (screenshot, trace, error-context). |
+| `get_trace_summary` (server opt-in, see below) | `testId` and `retry` (the attempt index) | Bounded, sanitized facts from that attempt's `trace.zip`: browser requests and API-context backend fetches, route markers and `route.fulfill`/`continue`/`abort` calls, identifier-based fetch links, redirects, the failing action and its time, console counts, page-error names, and parse coverage. |
 
 The server reports facts from the report and does not diagnose. The `outcome` is Playwright's own:
 - `flaky`: an attempt failed and a later one passed.
@@ -96,8 +97,33 @@ Each attempt's status is listed separately (`failed`, `timedOut`, `passed`…). 
 - `REPORT_CHANGED`
 - `TEST_NOT_FOUND`
 - `TEST_NOT_FAILED`
+- `ATTEMPT_NOT_FOUND` (`get_trace_summary` only: the test has no attempt with that `retry`)
 
 Arguments that don't match the input schema are rejected by the SDK before the tool runs.
+
+### `get_trace_summary` (Stage 3.2)
+
+The server registers this tool only when it is started with `--enable-trace-summary` (for example `npx @modelcontextprotocol/inspector node src/mcp/main.ts --enable-trace-summary`). `npm run mcp`, `.mcp.json` and the Agent SDK CLI don't pass it yet, so investigations still see only the two original tools.
+
+**Input and selection.** The input is a `testId` and a `retry`, nothing else; extra arguments such as a path are rejected. The trace is the `trace` attachment of that attempt in the current report, resolved and confined to the repo like every other attachment path. An attempt without a trace (passed under `retain-on-failure`, the first try under `on-first-retry`, `trace: 'off'`) returns `trace.status: "missing"`, not an error.
+
+**Status.**
+- `ok`: every whitelisted entry was read in full and its CRC-32 verified.
+- `partial`: something was not read (a budget, a corrupt or skipped entry, skipped lines). `trace.reasons` and `coverage` say what. Lists then cover only what was read. Anything not listed is **unknown, not absent**.
+- `missing`: no readable trace for this attempt.
+- `unsupported`: the archive is invalid or hostile, or the trace format isn't verified (only format `version: 10`, Playwright 1.64, is).
+
+**What it reads.** Only `test.trace` and `<n>-trace.trace`/`<n>-trace.network` entries, streamed through `yauzl` (pinned) and never extracted to disk. Screenshots, resources (bodies), sources, attachments and stacks are counted, never read. The ZIP layer refuses invalid, duplicate, NUL/control-character and traversal entry names and too many entries. It checks each entry's local header name against the central directory, counts actual inflated bytes against the limits (an entry whose declared size exceeds the per-entry limit is read only up to it and reported `partial`), verifies CRC-32 incrementally and drops corrupt entries entirely. Lines over 1 MB are skipped and counted.
+
+**Budgets** (initial ceilings, from the Stage 3.2 spike): 100 MB file, 5,000 entries, 64 MB per entry, 128 MB inflated per call, 250,000 lines, 2 s. At most 5,000 network records are kept in memory, by priority: 3,000 failed/error/pending/route-marked/redirect/API records, 1,500 documents/fetch/XHR, 500 static assets; the rest are counted. Of those, the 50 returned are the ones nearest the failure. One trace is parsed at a time. Parsing streams and yields to the event loop, so other tool calls stay responsive. Sanitized summaries are cached per server (16 entries), keyed by the file's identity (device, inode, size, mtime, ctime) and a hash of the archive tail (the central directory, with every entry's CRC). Results cut short by time or cancellation are not cached.
+
+**What it returns, and what it never returns.** Paths without origin, userinfo, query or fragment (secret-looking segments become `:redacted`), standard methods and reason phrases, `net::ERR_*` codes, route markers, call counts, glob paths (`null` for regexes and for globs that name a host or contain a secret-looking part), step locations for Playwright's own route steps (repo-relative with plain file-name characters, otherwise `null`), console counts by level and standard page-error names. Never: headers, cookies, bodies, `Route.fulfill` bodies, query strings, console or page-error messages, stacks, absolute host paths, arbitrary `test.trace` parameters or user step titles. Output is capped at 50 requests, 20 backend fetches/fulfillments/page errors and 64 KB. Redaction is heuristic: it minimizes free text but can't guarantee that no secret survives in a short path segment.
+
+**Observations, not classifications.** The tool never says what kind of defect a failure is. In particular:
+- `marker: "fulfilled"` (Playwright's `_wasFulfilled`) does **not** mean the test created the response. A `route.fetch()` response passed to `route.fulfill()` is marked fulfilled too. `routes.fulfillments[].fetch.link: "linked"` (matching fetch identifiers) proves that, with `fetchedStatus` and `statusChanged`. `"none"` means no identifier link, not "created by the test": a fetched response whose body was replaced loses the identifier.
+- `marker: "none"` or a missing server address does **not** prove a live backend response.
+- `route.fulfill` events carry no request identifier, so the request a call served is correlated by time window. Overlapping candidates stay `ambiguous`.
+- Redirects are matched to their target by exact URL; no match or several matches stay `unmatched`/`ambiguous`.
 
 ### Test identifiers
 
@@ -117,7 +143,7 @@ Limitations:
 - The repo root comes from the server file's own location, not the shell's working directory.
 - Attachment paths in the report are absolute paths from the machine that ran the tests. Both Windows `C:\…` and POSIX `/…` are supported. Each path is made relative to the report's own config directory and then resolved under this repo. That way, a report produced on a Linux CI machine still maps correctly.
 - UNC paths, drive-relative paths, control characters and `..` escapes are rejected. Paths outside the repo are reported as `outside-repo` and not checked.
-- Files are only `stat`ed, never read. Symlinks and junctions are resolved first, so a link that points outside the repo is refused.
+- Files are only `stat`ed, never read, with one exception: `get_trace_summary` reads the whitelisted event entries of the trace it selected (see above). Symlinks and junctions are resolved first, so a link that points outside the repo is refused.
 
 ### Lifecycle
 
@@ -218,8 +244,8 @@ The reported **estimated usage cost** is the SDK's own estimate at list prices (
 
 ```
 tests/ui/             UI specs, one file per feature area
-src/mcp/              MCP server: report.ts (parsing), paths.ts (path safety), server.ts (tools), main.ts (stdio)
-src/mcp/test/         node:test unit and protocol tests, with synthetic report fixtures
+src/mcp/              MCP server: report.ts (parsing), paths.ts (path safety), trace-summary.ts, trace.ts and zip.ts (get_trace_summary), server.ts (tools), main.ts (stdio)
+src/mcp/test/         node:test unit and protocol tests, with synthetic report fixtures and synthetic trace archives
 src/agent/            Agent SDK CLI: args.ts, auth.ts, config.ts (SDK options), result.ts (Zod types, Markdown), run.ts (session), main.ts (entry)
 src/agent/test/       node:test tests with fake SDK streams and a fake Claude Code process (offline)
 playwright.config.ts  Runner, reporters, artifact settings

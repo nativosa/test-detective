@@ -30,7 +30,8 @@ export type ReportErrorCode =
   | 'INVALID_TEST_ID'
   | 'REPORT_CHANGED'
   | 'TEST_NOT_FOUND'
-  | 'TEST_NOT_FAILED';
+  | 'TEST_NOT_FAILED'
+  | 'ATTEMPT_NOT_FOUND';
 
 export class ReportError extends Error {
   readonly code: ReportErrorCode;
@@ -321,7 +322,7 @@ function dirnameAnyFlavor(p: string): string {
 // ---------------------------------------------------------------------------
 // Walking
 
-type TestEntry = { key: string; spec: Spec; test: Test; titlePath: string[] };
+export type TestEntry = { key: string; spec: Spec; test: Test; titlePath: string[] };
 
 /**
  * Flattens recursively nested suites into one entry per (spec, project, repeat).
@@ -428,24 +429,7 @@ function summarize(loaded: LoadedReport, { key, spec, test, titlePath }: TestEnt
 // get_failure_details
 
 export async function getFailureDetails(loaded: LoadedReport, testId: string): Promise<FailureDetailsOutput> {
-  const match = TEST_ID.exec(testId);
-  if (!match) {
-    throw new ReportError('INVALID_TEST_ID', 'testId is not in the format returned by list_test_failures.', RELIST_HINT);
-  }
-  const [, key, fingerprint] = match;
-  if (fingerprint !== loaded.fingerprint) {
-    throw new ReportError(
-      'REPORT_CHANGED',
-      `testId belongs to report ${fingerprint}, but ${REPORT_PATH} is now ${loaded.fingerprint} (it was regenerated).`,
-      RELIST_HINT,
-    );
-  }
-  const entry = collectTests(loaded.report).find((e) => e.key === key);
-  if (!entry) throw new ReportError('TEST_NOT_FOUND', `No test with id ${testId} in this report.`, RELIST_HINT);
-  if (!isFailure(entry.test)) {
-    throw new ReportError('TEST_NOT_FAILED', `Test "${entry.spec.title}" did not fail (outcome: ${entry.test.status}).`, RELIST_HINT);
-  }
-
+  const entry = findFailedTest(loaded, testId);
   const { spec, test } = entry;
   const summary = summarize(loaded, entry);
   const project = loaded.report.config.projects?.find((p) => p.id === test.projectId);
@@ -466,6 +450,28 @@ export async function getFailureDetails(loaded: LoadedReport, testId: string): P
     timeoutMs: test.timeout ?? null,
     attempts: await Promise.all(test.results.map((r) => describeAttempt(loaded, r))),
   };
+}
+
+/** The failed or flaky test behind a testId from the current report; throws the documented ReportErrors. */
+export function findFailedTest(loaded: LoadedReport, testId: string): TestEntry {
+  const match = TEST_ID.exec(testId);
+  if (!match) {
+    throw new ReportError('INVALID_TEST_ID', 'testId is not in the format returned by list_test_failures.', RELIST_HINT);
+  }
+  const [, key, fingerprint] = match;
+  if (fingerprint !== loaded.fingerprint) {
+    throw new ReportError(
+      'REPORT_CHANGED',
+      `testId belongs to report ${fingerprint}, but ${REPORT_PATH} is now ${loaded.fingerprint} (it was regenerated).`,
+      RELIST_HINT,
+    );
+  }
+  const entry = collectTests(loaded.report).find((e) => e.key === key);
+  if (!entry) throw new ReportError('TEST_NOT_FOUND', `No test with id ${testId} in this report.`, RELIST_HINT);
+  if (!isFailure(entry.test)) {
+    throw new ReportError('TEST_NOT_FAILED', `Test "${entry.spec.title}" did not fail (outcome: ${entry.test.status}).`, RELIST_HINT);
+  }
+  return entry;
 }
 
 async function describeAttempt(loaded: LoadedReport, result: Result): Promise<z.infer<typeof Attempt>> {

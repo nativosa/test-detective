@@ -61,31 +61,53 @@ export type FileCheck =
   | { exists: false }
   | { exists: null; issue: string };
 
+export type FileIssue = 'outside-repo' | 'symlink-outside-repo' | 'not-a-file' | 'unreadable';
+
+export type LocatedFile =
+  | { kind: 'file'; real: string; sizeBytes: number }
+  | { kind: 'missing' }
+  | { kind: 'issue'; issue: FileIssue };
+
+const ISSUE_TEXT: Record<FileIssue, string> = {
+  'outside-repo': 'resolves outside the repository',
+  'symlink-outside-repo': 'symlink resolves outside the repository',
+  'not-a-file': 'not a regular file',
+  unreadable: 'could not be checked',
+};
+
 /**
- * Checks a repo-relative path on disk using only stat/realpath (never reads contents).
+ * Resolves a repo-relative path to its real path using only stat/realpath (never reads contents).
  * Symlinks are resolved so a link inside the repo pointing outside it is refused.
  */
-export async function checkFile(repoRoot: string, relative: string): Promise<FileCheck> {
+export async function locateFile(repoRoot: string, relative: string): Promise<LocatedFile> {
   const candidate = path.resolve(repoRoot, ...relative.split('/'));
-  if (!isInside(repoRoot, candidate)) return { exists: null, issue: 'resolves outside the repository' };
+  if (!isInside(repoRoot, candidate)) return { kind: 'issue', issue: 'outside-repo' };
   let real: string;
   let realRoot: string;
   try {
     realRoot = await realpath(repoRoot);
     real = await realpath(candidate);
   } catch (error) {
-    if (isNotFound(error)) return { exists: false };
-    return { exists: null, issue: 'could not be checked' };
+    if (isNotFound(error)) return { kind: 'missing' };
+    return { kind: 'issue', issue: 'unreadable' };
   }
-  if (!isInside(realRoot, real)) return { exists: null, issue: 'symlink resolves outside the repository' };
+  if (!isInside(realRoot, real)) return { kind: 'issue', issue: 'symlink-outside-repo' };
   try {
     const info = await stat(real);
-    if (!info.isFile()) return { exists: null, issue: 'not a regular file' };
-    return { exists: true, sizeBytes: info.size };
+    if (!info.isFile()) return { kind: 'issue', issue: 'not-a-file' };
+    return { kind: 'file', real, sizeBytes: info.size };
   } catch (error) {
-    if (isNotFound(error)) return { exists: false };
-    return { exists: null, issue: 'could not be checked' };
+    if (isNotFound(error)) return { kind: 'missing' };
+    return { kind: 'issue', issue: 'unreadable' };
   }
+}
+
+/** Like locateFile, in the shape get_failure_details reports. */
+export async function checkFile(repoRoot: string, relative: string): Promise<FileCheck> {
+  const located = await locateFile(repoRoot, relative);
+  if (located.kind === 'file') return { exists: true, sizeBytes: located.sizeBytes };
+  if (located.kind === 'missing') return { exists: false };
+  return { exists: null, issue: ISSUE_TEXT[located.issue] };
 }
 
 export function isNotFound(error: unknown): boolean {
