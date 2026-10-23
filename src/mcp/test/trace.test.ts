@@ -551,6 +551,28 @@ describe('get_trace_summary: format support', () => {
     const none = writeZip([{ name: 'resources/x.json', data: '{}' }]);
     assert.deepEqual(codes(await summarize(t, none)), ['no_trace_metadata']);
   });
+
+  test('a newer format and a missing version are unsupported, never read as version 10', async (t) => {
+    const newer = writeZip([
+      { name: 'test.trace', data: testTrace([]).replace('"version":10', '"version":11') },
+      { name: '1-trace.trace', data: JSON.stringify({ version: 11, type: 'context-options', browserName: 'chromium', monotonicTime: T0 }) },
+    ]);
+    const out = await summarize(t, newer);
+    assert.equal(out.trace.status, 'unsupported');
+    assert.deepEqual(codes(out), ['unsupported_trace_version']);
+    assert.equal(out.trace.format?.traceVersion, 11);
+    assert.equal(out.network, null);
+
+    const unversioned = writeZip([
+      { name: 'test.trace', data: testTrace([]).replace('"version":10,', '') },
+      { name: '1-trace.trace', data: JSON.stringify({ type: 'context-options', browserName: 'chromium', monotonicTime: T0 }) },
+    ]);
+    const missing = await summarize(t, unversioned);
+    assert.equal(missing.trace.status, 'unsupported');
+    assert.deepEqual(codes(missing), ['unsupported_trace_version']);
+    assert.equal(missing.trace.format?.traceVersion, null);
+    assert.equal(missing.network, null);
+  });
 });
 
 describe('get_trace_summary: budgets, partial results and caching', () => {
