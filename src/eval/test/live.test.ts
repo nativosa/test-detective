@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import type { CliArgs } from '../../agent/args.ts';
 import type { QueryFn } from '../../agent/run.ts';
 import { args } from '../../agent/test/helpers.ts';
+import { SERVER_VERSION } from '../../mcp/server.ts';
 import { EVAL_MAX_BUDGET_USD, LiveRefusal, parseLiveArgs, runLiveEvaluation } from '../live.ts';
 import type { LiveDeps, LiveResult } from '../live.ts';
 import { loadRunManifest, OUTCOME_FILE, RESULT_FILE, RunOutcome, SCORE_FILE, ScoreConflictError, scoreRun, SUMMARY_JSON, SUMMARY_MD, TRANSCRIPT_FILE } from '../runs.ts';
@@ -89,6 +90,9 @@ describe('successful live evaluation (fake SDK stream)', () => {
     assert.equal(outcome.preflight.skillSha256, sha256(await readFile(path.join(REPO_ROOT, ...CONFIG_FILES[0].split('/')))));
     assert.equal(outcome.preflight.settingsSha256, sha256(await readFile(path.join(REPO_ROOT, ...CONFIG_FILES[1].split('/')))));
     assert.equal(outcome.preflight.sdkVersion, '0.3.302');
+    assert.equal(outcome.preflight.mcpServerVersion, SERVER_VERSION, 'MCP server version recorded with the Skill hash');
+    assert.equal(r.score!.inputs.mcpServerVersion, SERVER_VERSION);
+    assert.equal(r.score!.inputs.model, r.result!.observed.model);
     assert.equal(outcome.snapshot?.manifestSha256, sha256(await readFile(path.join(snapshot.dir, 'manifest.json'))));
     assert.equal(outcome.snapshot?.reportFingerprint, snapshot.manifest.reportFingerprint);
     const session = outcome.preflight.session!;

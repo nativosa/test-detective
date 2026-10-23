@@ -53,6 +53,17 @@ describe('Stage 2.6 golden variants (current scorer)', () => {
   }
 });
 
+describe('scorer v8 on sessions without get_trace_summary', () => {
+  test('no trace claims to compare, no tool calls recorded; Bash trace reads count as Bash acquisition', () => {
+    for (const r of records.values()) {
+      assert.equal(statusOf(r, 'trace_consistency'), 'not_applicable', r.evalId);
+      for (const t of r.traceEvidence?.tests ?? []) assert.deepEqual(t.summaries, [], r.evalId);
+    }
+    assert.equal(scoreOf('s07Correct').traceEvidence?.tests[0]?.acquisition, 'bash');
+    assert.equal(scoreOf('s08Correct').traceEvidence?.tests[0]?.acquisition, 'no_trace');
+  });
+});
+
 describe('scorer v6 policies', () => {
   test('S07: the observed flaky outcome is recorded per test and checked against the truth', () => {
     const r = scoreOf('s07Correct');

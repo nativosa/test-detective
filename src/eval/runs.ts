@@ -92,6 +92,7 @@ export const RunOutcome = z
         skillSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
         settingsSha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
         sdkVersion: z.string().nullable(),
+        mcpServerVersion: z.string().nullable().optional().describe('test-detective MCP server version (src/mcp/server.ts); absent in runs saved before Stage 3.4'),
         nodeVersion: z.string(),
         session: z.record(z.string(), z.unknown()).nullable().describe('Sanitized evaluation session options (no env values)'),
       })

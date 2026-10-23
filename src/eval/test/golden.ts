@@ -56,7 +56,8 @@ export type Session = {
   outcome?: (o: RunOutcome) => RunOutcome;
 };
 
-export type Variant = { name: string; about: string; session: (f: Facts) => Session };
+/** A session may be built asynchronously, e.g. from real get_trace_summary output for the workspace. */
+export type Variant = { name: string; about: string; session: (f: Facts) => Session | Promise<Session> };
 
 // ---------------------------------------------------------------------------
 // Building blocks
@@ -363,7 +364,7 @@ export function variantQuery(variant: Variant, scenarioId: string, calls = { n: 
   return ({ prompt, options }) => {
     calls.n++;
     const ready = (async () => {
-      const session = variant.session(await factsFor(options.cwd!));
+      const session = await variant.session(await factsFor(options.cwd!));
       return fakeQuery({ messages: await sessionMessages(session, scenarioId), hang: session.hang, account: session.account }).query({ prompt, options });
     })();
     let handle: Awaited<typeof ready> | undefined;
@@ -387,12 +388,13 @@ export function variantQuery(variant: Variant, scenarioId: string, calls = { n: 
  * Runs one variant through runInvestigation + evalQuery in a fresh workspace and saves
  * outcome.json, result.json and transcript.jsonl under `<runDir>/<evalId>/`.
  */
-export async function writeEvaluation(runDir: string, evalId: string, snapshot: LoadedSnapshot, variant: Variant, workParent: string): Promise<void> {
+/** `scenariosRoot`: where the truth the run is captured against lives (a test may use an edited copy). */
+export async function writeEvaluation(runDir: string, evalId: string, snapshot: LoadedSnapshot, variant: Variant, workParent: string, scenariosRoot = SCENARIOS_DIR): Promise<void> {
   const markers = await leakMarkers();
   await mkdir(workParent, { recursive: true });
   const workspace = await createWorkspace(snapshot, { repoRoot: REPO_ROOT, parent: workParent }, markers);
   try {
-    const session = variant.session(await factsFor(workspace.root));
+    const session = await variant.session(await factsFor(workspace.root));
     const messages = await sessionMessages(session, snapshot.manifest.scenarioId);
     const cliArgs = args(session.args ?? {});
     const context = { repoRoot: REPO_ROOT, workspace };
@@ -417,7 +419,7 @@ export async function writeEvaluation(runDir: string, evalId: string, snapshot: 
       snapshot: { reportFingerprint: snapshot.manifest.reportFingerprint, manifestSha256: sha256(await readFile(path.join(snapshot.dir, MANIFEST_FILE))) },
       preflight: {
         capturedAt: new Date(START).toISOString(),
-        truthSha256: sha256(await readFile(path.join(SCENARIOS_DIR, snapshot.manifest.scenarioId, 'truth.json'))),
+        truthSha256: sha256(await readFile(path.join(scenariosRoot, snapshot.manifest.scenarioId, 'truth.json'))),
         skillSha256: workspace.configFiles[0]!.sha256,
         settingsSha256: workspace.configFiles[1]!.sha256,
         sdkVersion: '0.3.302',

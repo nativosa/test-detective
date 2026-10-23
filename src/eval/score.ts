@@ -1,15 +1,16 @@
 import path from 'node:path';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod';
-import { MCP_DETAILS, MCP_LIST, SKILL_NAME, SKILL_TOOL } from '../agent/config.ts';
+import { MCP_DETAILS, MCP_LIST, MCP_TRACE, SKILL_NAME, SKILL_TOOL } from '../agent/config.ts';
 import { CLASSIFICATIONS, InvestigationResult, ModelReport, RUN_STATUSES } from '../agent/result.ts';
 import type { ModelInvestigation, RunStatus } from '../agent/result.ts';
 import { FailureDetailsOutput, ListFailuresOutput } from '../mcp/report.ts';
+import { TraceSummaryOutput } from '../mcp/trace-summary.ts';
 import { auditTranscript, resolveFrom } from './isolation.ts';
 import type { Finding } from './isolation.ts';
 import type { RunOutcome } from './runs.ts';
 import { CONFIDENCE_LEVELS } from './truth.ts';
-import type { GroundTruth } from './truth.ts';
+import type { GroundTruth, TraceObservation } from './truth.ts';
 import { CONFIG_FILES, isInside } from './workspace.ts';
 import type { LeakMarkers } from './workspace.ts';
 
@@ -46,7 +47,16 @@ import type { LeakMarkers } from './workspace.ts';
 //    (every pattern describes re-running the test) in root_cause and recommendation; nothing else.
 //    A file whose every read attempt the permission system denied is "access_denied": an honest
 //    "not available" claim passes, a citation goes to review, and required evidence still fails.
-export const SCORER_VERSION = 7;
+// 8: get_trace_summary results are evidence. Each is validated against TraceSummaryOutput and tied to
+//    its testId, retry and report; status ok or partial counts as obtained, missing, unsupported,
+//    denied, failed or invalid never does. A required trace met through MCP needs its truth
+//    `observations` in a returned summary (or, without them, a fully read one); a partial summary
+//    without them goes to review. The trace_consistency check compares structured trace claims (retry,
+//    status, request path and HTTP status, route marker, fetch link, status change, completeness,
+//    absence) with the returned summaries: fail only for a clear contradiction, review when unclear.
+//    Per-test trace acquisition (MCP, Bash, not obtained), the model ID and the MCP server version are
+//    recorded. A session that never calls the tool scores exactly as under 7, plus that record.
+export const SCORER_VERSION = 8;
 
 export const CATEGORIES = [
   'scored',
@@ -71,6 +81,7 @@ export const CHECK_IDS = [
   'evidence_validity',
   'evidence_sufficiency',
   'citations',
+  'trace_consistency',
   'confidence',
   'source_mismatch',
   'recommendation',
@@ -95,8 +106,10 @@ export type AcceptanceStatus = (typeof ACCEPTANCE_STATUSES)[number];
  * - false_unavailable: claimed not available although the snapshot has it (and nothing denied access)
  * - access_denied: the file exists, but every attempt to read it was denied by the permission system
  *   (result `permission_denials` plus an error tool_result); never counts as inspected
+ * Trace claims (trace_consistency): consistent (agrees with a returned trace summary), contradiction
+ * (a returned summary shows otherwise), retry_mismatch (cites an attempt whose trace was not obtained).
  */
-export const EVIDENCE_TAGS = ['verified', 'unresolved', 'unsupported', 'confirmed_false', 'false_unavailable', 'access_denied', 'unavailable', 'skipped', 'unreported', 'not_inspected', 'unacknowledged'] as const;
+export const EVIDENCE_TAGS = ['verified', 'unresolved', 'unsupported', 'confirmed_false', 'false_unavailable', 'access_denied', 'unavailable', 'skipped', 'unreported', 'not_inspected', 'unacknowledged', 'consistent', 'contradiction', 'retry_mismatch'] as const;
 
 /** Option paths the evaluation may change relative to `npm run investigate` (see isolation.ts). */
 export const ALLOWED_OPTION_DIFFERENCES = ['cwd', 'mcpServers.test-detective.env', 'settings.permissions.deny'];
@@ -120,6 +133,19 @@ const TestVerdict = z.strictObject({
 });
 export type TestVerdict = z.infer<typeof TestVerdict>;
 
+export const TRACE_CALL_STATUSES = ['ok', 'partial', 'missing', 'unsupported', 'error', 'denied', 'invalid', 'pending'] as const;
+export const TRACE_ACQUISITIONS = ['mcp', 'bash', 'mcp_and_bash', 'not_obtained', 'no_trace'] as const;
+
+const TraceAcquisition = z.strictObject({
+  title: z.string(),
+  testId: z.string().nullable(),
+  acquisition: z
+    .enum(TRACE_ACQUISITIONS)
+    .describe("mcp: a get_trace_summary result with status ok or partial; bash: a trace file read through a tool call (Bash fallback); no_trace: the report kept no trace and none was obtained"),
+  summaries: z.array(z.strictObject({ retry: z.number().nullable(), status: z.enum(TRACE_CALL_STATUSES), reasons: z.array(z.string()) })),
+  limitations: z.array(z.string()).describe('Coverage limits of what was obtained (partial reads, omitted records)'),
+});
+
 export const ScoreRecord = z.strictObject({
   formatVersion: z.literal(1),
   scorerVersion: z.number().int(),
@@ -137,6 +163,8 @@ export const ScoreRecord = z.strictObject({
     resultSha256: z.string().nullable(),
     transcriptSha256: z.string().nullable(),
     transcriptMessages: z.number().int().nullable(),
+    model: z.string().nullable().default(null).describe('Model ID the session reported (result.json); null before version 8'),
+    mcpServerVersion: z.string().nullable().default(null).describe('test-detective MCP server version captured before the session; null if not recorded'),
   }),
   setup: z.strictObject({ ok: z.boolean(), problems: z.array(z.string()) }),
   transcript: z
@@ -171,6 +199,11 @@ export const ScoreRecord = z.strictObject({
     pending: z.array(z.string()).describe('Reviews that must be resolved first'),
   }),
   checks: z.array(Check),
+  traceEvidence: z
+    .strictObject({ tests: z.array(TraceAcquisition) })
+    .nullable()
+    .default(null)
+    .describe("How each expected test's trace evidence was obtained; null when not scored diagnostically or scored before version 8"),
   review: z.strictObject({ needed: z.boolean(), reasons: z.array(z.string()) }),
   metrics: z.strictObject({
     wallClockMs: z.number().nullable(),
@@ -323,6 +356,8 @@ export function scoreEvaluation(input: ScoreInput): ScoreRecord {
       resultSha256: input.resultSha256,
       transcriptSha256: input.transcriptSha256,
       transcriptMessages: transcript?.length ?? null,
+      model: result?.observed.model ?? null,
+      mcpServerVersion: outcome?.preflight.mcpServerVersion ?? null,
     },
     setup: { ok: problems.length === 0, problems },
     transcript: completeness,
@@ -331,6 +366,7 @@ export function scoreEvaluation(input: ScoreInput): ScoreRecord {
     classification: { expected: truth?.expected.classification ?? null, tests },
     acceptance: acceptanceOf(category, statuses, tests, audit.verdict === 'suspicious'),
     checks,
+    traceEvidence: diagnostic && ctx ? { tests: traceAcquisition(ctx) } : null,
     review: { needed: reviewReasons.length > 0 && (category === 'needs_review' || category === 'unverified'), reasons: reviewReasons },
     metrics: {
       wallClockMs: outcome ? Math.max(0, Date.parse(outcome.finishedAt) - Date.parse(outcome.startedAt)) : null,
@@ -441,18 +477,45 @@ export function toolCallsOf(messages: SDKMessage[]): Call[] {
   return calls;
 }
 
+/**
+ * One get_trace_summary call, tied to the testId and retry it asked for. `output` is set only for a
+ * result that validates against TraceSummaryOutput and answers exactly that testId and retry;
+ * anything else is `invalid`. Only ok and partial results are evidence.
+ */
+type TraceCall = { id: string; testId: string | null; retry: number | null; status: (typeof TRACE_CALL_STATUSES)[number]; reasons: string[]; output: TraceSummaryOutput | null };
+
 type Observed = {
   skillInvoked: boolean;
   skillReadAsFile: boolean;
   listOk: boolean;
   list: ListFailuresOutput | null;
   details: Map<string, FailureDetailsOutput>;
+  traces: TraceCall[];
   fingerprints: Set<string>;
 };
+
+function traceCallOf(c: Call): TraceCall {
+  const testId = typeof c.input.testId === 'string' ? c.input.testId : null;
+  const retry = typeof c.input.retry === 'number' ? c.input.retry : null;
+  const base = { id: c.id, testId, retry, reasons: [] as string[], output: null };
+  if (c.outcome === 'pending') return { ...base, status: 'pending' };
+  if (c.denied) return { ...base, status: 'denied' };
+  const json = parseJson(c.resultText);
+  if (c.outcome === 'error') {
+    const code = (json as { error?: { code?: unknown } } | undefined)?.error?.code;
+    return { ...base, status: 'error', reasons: typeof code === 'string' ? [code] : [] };
+  }
+  const parsed = TraceSummaryOutput.safeParse(json);
+  if (!parsed.success) return { ...base, status: 'invalid', reasons: ['output fails TraceSummaryOutput'] };
+  if (parsed.data.testId !== testId || parsed.data.retry !== retry) return { ...base, status: 'invalid', reasons: ['output answers a different testId or retry'] };
+  return { ...base, status: parsed.data.trace.status, reasons: parsed.data.trace.reasons.map((r) => r.code), output: parsed.data };
+}
 
 function observedFacts(calls: Call[]): Observed {
   const details = new Map<string, FailureDetailsOutput>();
   const fingerprints = new Set<string>();
+  const traces = calls.filter((c) => c.name === MCP_TRACE).map(traceCallOf);
+  for (const t of traces) if (t.output) fingerprints.add(t.output.reportFingerprint);
   let list: ListFailuresOutput | null = null;
   for (const c of calls.filter((c) => c.outcome === 'ok')) {
     if (c.name === MCP_LIST) {
@@ -476,6 +539,7 @@ function observedFacts(calls: Call[]): Observed {
     listOk: list !== null,
     list,
     details,
+    traces,
     fingerprints,
   };
 }
@@ -623,6 +687,7 @@ function buildChecks(
     evidenceValidityCheck(ctx),
     evidenceSufficiencyCheck(ctx, matched),
     citationsCheck(ctx, matched),
+    traceConsistencyCheck(ctx, matched),
     confidenceCheck(ctx, matched),
     sourceMismatchCheck(ctx, matched),
     recommendationCheck(ctx, matched),
@@ -868,7 +933,17 @@ const MCP_TOOL_NAMES: Record<string, string> = {
   [MCP_DETAILS]: MCP_DETAILS,
   list_test_failures: MCP_LIST,
   [MCP_LIST]: MCP_LIST,
+  get_trace_summary: MCP_TRACE,
+  [MCP_TRACE]: MCP_TRACE,
 };
+/** get_trace_summary refs may carry the attempt ("get_trace_summary (retry 0)"); other tool refs must match exactly, as before. */
+const TRACE_REF = /^(mcp__test-detective__)?get_trace_summary/;
+
+/** The MCP tool a ref names, if any. */
+function toolOf(ref: string | null): string | undefined {
+  if (!ref) return undefined;
+  return MCP_TOOL_NAMES[ref.trim()] ?? (TRACE_REF.test(ref.trim()) ? MCP_TRACE : undefined);
+}
 const KIND_FILES: Partial<Record<ModelInvestigation['evidence'][number]['kind'], RegExp>> = {
   trace: /^test-results\/.+\.zip$/,
   screenshot: /^test-results\/.+\.png$/,
@@ -953,6 +1028,7 @@ function provenance(file: string, ctx: Context): Provenance {
 }
 
 function mcpObtained(tool: string, testId: string | null, ctx: Context): boolean {
+  if (tool === MCP_TRACE) return tracesFor(testId, ctx).some(usable);
   return tool === MCP_DETAILS ? (testId !== null ? ctx.observed.details.has(testId) : ctx.observed.details.size > 0) : ctx.observed.listOk;
 }
 
@@ -983,9 +1059,11 @@ function evidenceValidityCheck(ctx: Context): Check {
   for (const { analysis } of ctx.result.investigations) {
     for (const e of analysis.evidence) {
       const id = `${e.kind}:${e.ref ?? '(no ref)'}`;
-      const tool = e.ref ? MCP_TOOL_NAMES[e.ref.trim()] : e.kind === 'mcp' ? MCP_DETAILS : undefined;
+      const tool = e.ref ? toolOf(e.ref) : e.kind === 'mcp' ? MCP_DETAILS : undefined;
       if (e.status === 'skipped') {
         items.push({ id, status: 'pass', detail: 'skipped (no claim to verify)', tag: 'skipped' });
+      } else if (tool === MCP_TRACE) {
+        items.push(traceClaimItem(id, e.status, analysis.testId, ctx));
       } else if (e.status === 'not_available') {
         const resolved = e.ref && !tool ? resolveRef(e.ref, ctx).file : null;
         const pattern = KIND_FILES[e.kind];
@@ -1037,10 +1115,13 @@ function evidenceSufficiencyCheck(ctx: Context, matched: Matched[]): Check {
         const candidates = ctx.files.paths.filter((p) => pattern.test(p));
         const claimed = m.analysis.evidence.some((e) => {
           if (e.kind !== r.kind || e.status !== 'inspected' || !e.ref) return false;
+          // A trace obtained through get_trace_summary is claimed by naming the tool.
+          if (r.kind === 'trace' && toolOf(e.ref) === MCP_TRACE) return true;
           const file = resolveRef(e.ref, ctx).file;
           return file !== null && pattern.test(file);
         });
         const levels = candidates.map((f) => provenance(f, ctx));
+        if (r.kind === 'trace') levels.push(traceProvenance(pattern, r.observations, m.testId, ctx));
         const best = (['verified', 'partial', 'denied', 'failed', 'none'] as const).map((l) => levels.find((p) => p.level === l)).find(Boolean) ?? { level: 'none', via: 'no file' };
         item = sufficiency(id, claimed, best, candidates.length > 0);
       }
@@ -1094,12 +1175,17 @@ function citationsCheck(ctx: Context, matched: Matched[]): Check {
     const refs = m.analysis.analysis.flatMap((a) => a.evidenceRefs);
     if (refs.length === 0) items.push({ id: m.test.title, status: 'review', detail: 'no analysis point cites evidence', tag: 'unresolved' });
     for (const ref of new Set(refs)) {
-      const tool = MCP_TOOL_NAMES[ref.trim()];
+      const tool = toolOf(ref);
       if (tool) {
         items.push(
           mcpObtained(tool, m.testId, ctx)
             ? { id: ref, status: 'pass', detail: 'MCP result obtained', tag: 'verified' }
-            : { id: ref, status: 'fail', detail: 'cites an MCP result that was never obtained', tag: 'confirmed_false' },
+            : {
+                id: ref,
+                status: 'fail',
+                detail: tool === MCP_TRACE ? `cites get_trace_summary, but no trace evidence was obtained for this test (${callStatuses(tracesFor(m.testId, ctx))})` : 'cites an MCP result that was never obtained',
+                tag: 'confirmed_false',
+              },
         );
         continue;
       }
@@ -1112,6 +1198,341 @@ function citationsCheck(ctx: Context, matched: Matched[]): Check {
   }
   if (items.length === 0) return check('citations', 'not_applicable', 'no analysis to check');
   return fromItems('citations', items, 'every citation resolves to evidence the agent verifiably obtained');
+}
+
+// ---------------------------------------------------------------------------
+// Trace evidence through get_trace_summary (version 8)
+
+type TraceSummary = TraceSummaryOutput;
+const usable = (t: TraceCall): t is TraceCall & { output: TraceSummary } => (t.status === 'ok' || t.status === 'partial') && t.output !== null;
+
+function tracesFor(testId: string | null, ctx: Context): TraceCall[] {
+  return testId === null ? [] : ctx.observed.traces.filter((t) => t.testId === testId);
+}
+
+function callStatuses(list: TraceCall[]): string {
+  return list.map((t) => `retry ${t.retry ?? '?'}: ${t.status}${t.reasons.length ? ` (${t.reasons.join(', ')})` : ''}`).join('; ') || 'no call';
+}
+
+/** An evidence row that names get_trace_summary. Only ok and partial results count as inspected. */
+function traceClaimItem(id: string, status: 'inspected' | 'not_available', testId: string | null, ctx: Context): Item {
+  const list = tracesFor(testId, ctx);
+  const got = list.filter(usable);
+  if (status === 'inspected') {
+    if (got.length > 0) return { id, status: 'pass', detail: `get_trace_summary returned trace evidence (${callStatuses(got)})`, tag: 'verified' };
+    return list.length > 0
+      ? { id, status: 'fail', detail: `claimed inspected, but get_trace_summary returned no trace evidence (${callStatuses(list)})`, tag: 'confirmed_false' }
+      : { id, status: 'fail', detail: 'claimed inspected, but get_trace_summary was never called for this test', tag: 'confirmed_false' };
+  }
+  if (got.length > 0) {
+    return { id, status: 'review', detail: `reported not available, but get_trace_summary returned trace evidence (${callStatuses(got)}); check which attempt it means`, tag: 'unresolved' };
+  }
+  if (list.length > 0) {
+    return { id, status: 'pass', detail: `not available: get_trace_summary returned ${callStatuses(list)}`, tag: list.every((t) => t.status === 'denied') ? 'access_denied' : 'unavailable' };
+  }
+  return ctx.files.paths.some((p) => KIND_FILES.trace!.test(p))
+    ? { id, status: 'review', detail: 'names get_trace_summary as not available, but it was never called and the snapshot has a trace', tag: 'unresolved' }
+    : { id, status: 'pass', detail: 'not available, and not in the snapshot', tag: 'unavailable' };
+}
+
+/**
+ * A required trace met through get_trace_summary. With truth observations, a returned summary must
+ * contain each of them; without, a fully read summary (status ok) is enough. What is missing from a
+ * partial read may be in the unread part, so it goes to review (level partial), never to fail.
+ */
+function traceProvenance(pattern: RegExp, observations: TraceObservation[] | undefined, testId: string | null, ctx: Context): Provenance {
+  const list = tracesFor(testId, ctx);
+  const got = list.filter(usable).filter((t) => pattern.test(t.output.trace.path ?? ''));
+  if (got.length === 0) {
+    if (list.length === 0) return { level: 'none', via: 'no get_trace_summary call for this test' };
+    if (list.every((t) => t.status === 'denied')) return { level: 'denied', via: `every get_trace_summary call was denied (${callStatuses(list)})` };
+    return { level: 'failed', via: `get_trace_summary returned no trace evidence (${callStatuses(list)})` };
+  }
+  if (observations) {
+    const missing = observations.filter((o) => !got.some((t) => hasObservation(o, t.output)));
+    if (missing.length === 0) return { level: 'verified', via: `get_trace_summary returned the required observations (${callStatuses(got)})` };
+    const partly = got.some((t) => t.status === 'partial') ? '; the trace was only partly read, so they may be in the unread part' : '';
+    return { level: 'partial', via: `get_trace_summary (${callStatuses(got)}) did not return ${missing.map(describeObservation).join(', ')}${partly}` };
+  }
+  const full = got.find((t) => t.status === 'ok');
+  return full
+    ? { level: 'verified', via: `get_trace_summary returned the whole trace (retry ${full.retry})` }
+    : { level: 'partial', via: `get_trace_summary returned only partial traces (${callStatuses(got)}); the required evidence may be in the unread part` };
+}
+
+function hasObservation(o: TraceObservation, out: TraceSummary): boolean {
+  const re = new RegExp(o.path, 'i');
+  if (o.source === 'backend') return (out.backendFetches?.items ?? []).some((b) => b.path !== null && re.test(b.path) && (o.status === undefined || b.status === o.status));
+  return (out.network?.requests ?? []).some((r) => r.path !== null && re.test(r.path) && (o.status === undefined || r.status === o.status) && (o.marker === undefined || r.marker === o.marker));
+}
+
+function describeObservation(o: TraceObservation): string {
+  return `${o.source === 'backend' ? 'a backend fetch' : 'a request'} matching /${o.path}/${o.status !== undefined ? ` with status ${o.status}` : ''}${o.marker ? ` and marker ${o.marker}` : ''}`;
+}
+
+/** Trace attachments the report lists for a test (every attempt), as snapshot paths. */
+function traceFilesOf(testId: string | null, ctx: Context): string[] {
+  const details = testId ? ctx.observed.details.get(testId) : undefined;
+  if (!details) return [];
+  const paths = details.attempts.flatMap((a) => a.attachments.filter((x) => x.name === 'trace' && x.location === 'repo' && x.exists === true && x.path).map((x) => x.path!));
+  return [...new Set(paths.map((p) => ctx.files.lookup.get(key(p))).filter((p): p is string => p !== undefined))];
+}
+
+/** Per expected test: whether its trace was obtained through MCP, through a tool call on the file (Bash fallback), or not at all. */
+function traceAcquisition(ctx: Context): z.infer<typeof TraceAcquisition>[] {
+  return matchInvestigations(ctx).map((m) => {
+    const testId = m.testId ?? ctx.observed.list?.failures.find((f) => f.title === m.test.title && f.file === m.test.file)?.testId ?? null;
+    const list = tracesFor(testId, ctx);
+    const files = traceFilesOf(testId, ctx);
+    const viaMcp = list.some(usable);
+    const viaFile = files.some((f) => provenance(f, ctx).level === 'verified');
+    const limitations: string[] = [];
+    for (const t of list) {
+      if (!usable(t)) limitations.push(`retry ${t.retry ?? '?'}: ${t.status}${t.reasons.length ? ` (${t.reasons.join(', ')})` : ''}; no trace evidence`);
+      else if (t.status === 'partial') limitations.push(`retry ${t.retry}: partial (${t.reasons.join(', ') || 'no reason given'}); events not listed are unknown`);
+      else {
+        const omitted = (t.output.network?.omitted.overLimit ?? 0) + (t.output.network?.omitted.notRetained ?? 0);
+        if (omitted > 0) limitations.push(`retry ${t.retry}: ${omitted} request record(s) not listed`);
+      }
+    }
+    const acquisition = viaMcp && viaFile ? 'mcp_and_bash' : viaMcp ? 'mcp' : viaFile ? 'bash' : files.length > 0 ? 'not_obtained' : 'no_trace';
+    return { title: m.test.title, testId, acquisition, summaries: list.map((t) => ({ retry: t.retry, status: t.status, reasons: t.reasons })), limitations };
+  });
+}
+
+// Claim extraction. Deliberately narrow: only sentences that cite get_trace_summary, and only these
+// shapes. Anything else is not checked (a limitation, not a pass).
+const URL_IN_TEXT = /\b(?:https?|wss?):\/\/[^\s/"'`)]+(\/[^\s"'`),;]*)?/gi;
+const PATH_IN_TEXT = /(?<![\w.:/-])(\/[A-Za-z0-9._~%:-]+(?:\/[A-Za-z0-9._~%:-]+)*)\/?/g;
+const STATUS_IN_TEXT = /(?<![\w:./#-])([1-5]\d{2})(?![\w%/-]|\.\d)(?!\s*(?:ms|s\b|sec|seconds|px|bytes|kb|mb|requests?|records?|lines?|entries))/gi;
+const FILE_EXT = /\.(ts|js|zip|md|png|jpe?g|webm|trace|network)$/i;
+const RETRY_STATUS = /\bretry\s*#?\s*(\d+)\b[^.;]{0,24}?\b(ok|partial|missing|unsupported)\b/gi;
+const MARKER_CLAIM = /\bmarker\b["'`]?\s*[:=]?\s*["'`]?(fulfilled|continued|aborted|none|unknown)\b|_wasFulfilled["'`]?\s*[:=]?\s*true|\b(no|without an?) (route )?marker\b/i;
+const LINK_CLAIM = /\b(?:fetch\.)?link\b["'`]?\s*[:=]\s*["'`]?(linked|none|unresolved)\b|\b(linked) (?:to|by) (?:a |the )?(?:backend |route\.fetch\(\) )?fetch\b|\b(no fetch link|not linked)\b/i;
+const STATUS_CHANGED_CLAIM = /statusChanged["'`]?\s*[:=]\s*(true|false)/i;
+const UNCHANGED_CLAIM = /\bunchanged\b|\bpass(?:ed|es)? (?:it |the response |the error )?(?:through|on) (?:as[- ]is|unmodified)|\bnot (?:changed|modified|altered)\b/i;
+const CHANGED_CLAIM = /\b(?:status|response)\b[^.;]{0,30}\b(?:was |were )?(?:changed|modified|rewritten|overridden|altered)\b|\b(?:changed|modified|rewrote|overrode|altered)\b[^.;]{0,20}\b(?:status|response)\b/i;
+const FETCHED_STATUS_CLAIM = /fetchedStatus["'`]?\s*[:=]\s*(\d{3})|\bbackend (?:returned|responded with|sent) (?:an? )?(?:HTTP )?(\d{3})\b/i;
+const TEST_CREATED_CLAIM = /\btest[- ](?:created|generated|fabricated|made|built)\b|\b(?:created|fabricated|built|generated|invented) by the test\b|\bthe test (?:itself )?(?:created|fabricated|built|generated|invented) (?:the|a|an|its own)\b|\b(?:mocked|stubbed|faked) (?:the |a |an )?(?:500|response|error|status)\b/i;
+const NO_BACKEND_CLAIM = /\bno (?:backend|server) (?:fetch|request|call)|\bnever reached the (?:backend|server)\b|\b(?:did not|didn't) reach the (?:backend|server)\b/i;
+const ABSENCE_CLAIM = /\bno (page ?errors?|failed requests?|network (?:errors?|failures?)|console errors?)\b/i;
+const COMPLETE_CLAIM = /\b(?:complete|full|entire|whole) trace\b|\bfully read\b|coverage\.complete["'`]?\s*[:=]\s*true/i;
+const NEGATION_BEFORE = /\b(not|never|no|without|cannot|can't|doesn't|does not|isn't|is not)\b[^.;]{0,30}$/i;
+
+function samePath(claimed: string, observed: string | null): boolean {
+  if (observed === null) return false;
+  const a = claimed.replace(/\/+$/, '').split('/');
+  const b = observed.replace(/\/+$/, '').split('/');
+  return a.length === b.length && a.every((s, i) => s === b[i] || b[i] === ':redacted');
+}
+
+/**
+ * Compares structured trace claims with the get_trace_summary results the session obtained for the
+ * test. A claim is checked only in an evidence note or analysis point that cites get_trace_summary.
+ * Pass: a returned summary shows it. Fail: a returned summary clearly shows otherwise, or no trace
+ * evidence was obtained at all. Review: the summary can't decide (partial, omitted, no link).
+ */
+function traceConsistencyCheck(ctx: Context, matched: Matched[]): Check {
+  const items: Item[] = [];
+  const add = (item: Item) => {
+    if (!items.some((i) => i.id === item.id)) items.push(item);
+  };
+  for (const m of matched) {
+    if (!m.analysis) continue;
+    const units = [
+      ...m.analysis.evidence.filter((e) => e.kind === 'trace' && e.status === 'inspected' && toolOf(e.ref) === MCP_TRACE).map((e) => `${e.ref}: ${e.note}`),
+      ...m.analysis.analysis.filter((a) => a.evidenceRefs.some((r) => toolOf(r) === MCP_TRACE)).map((a) => a.point),
+    ];
+    const all = tracesFor(m.testId, ctx);
+    const obtained = all.filter(usable);
+    for (const unit of units) {
+      const text = searchable([unit]).replace(URL_IN_TEXT, (_, p: string | undefined) => ` ${(p ?? '/').split(/[?#]/)[0]}`);
+      for (const sentence of text.split(/(?<=[.!?])\s+/)) {
+        const id = (kind: string, what: string) => `${m.test.title}: ${kind} ${what}`;
+        // Retry attribution. A retry stated with its trace status ("retry 1: missing") is judged by
+        // that status below; a retry cited for its contents must have returned trace evidence.
+        const stated = new Map([...sentence.matchAll(RETRY_STATUS)].map((x) => [Number(x[1]), x[2]!.toLowerCase()]));
+        const mentioned = [...new Set([...sentence.matchAll(/\bretry\s*#?\s*(\d+)\b/gi)].map((x) => Number(x[1])))];
+        const retries = mentioned.filter((r) => stated.get(r) !== 'missing' && stated.get(r) !== 'unsupported');
+        for (const retry of retries.filter((r) => !stated.has(r))) {
+          const calls = all.filter((t) => t.retry === retry);
+          if (calls.some(usable)) add({ id: id('retry', String(retry)), status: 'pass', detail: `retry ${retry}: get_trace_summary returned trace evidence`, tag: 'consistent' });
+          else if (calls.length > 0) add({ id: id('retry', String(retry)), status: 'fail', detail: `cites retry ${retry}, but get_trace_summary returned ${callStatuses(calls)}`, tag: 'retry_mismatch' });
+          else add({ id: id('retry', String(retry)), status: 'fail', detail: `cites retry ${retry}, but get_trace_summary was called only for ${callStatuses(all)}`, tag: 'retry_mismatch' });
+        }
+        for (const x of sentence.matchAll(RETRY_STATUS)) {
+          const retry = Number(x[1]);
+          const claimed = x[2]!.toLowerCase();
+          const call = all.find((t) => t.retry === retry && t.status !== 'pending');
+          if (!call) {
+            add({ id: id('retry', String(retry)), status: 'fail', detail: `reports retry ${retry} as ${claimed}, but get_trace_summary was called only for ${callStatuses(all)}`, tag: 'retry_mismatch' });
+            continue;
+          }
+          add(
+            call.status === claimed
+              ? { id: id('trace status', `retry ${retry}`), status: 'pass', detail: `retry ${retry} reported as ${claimed}, as returned`, tag: 'consistent' }
+              : { id: id('trace status', `retry ${retry}`), status: 'fail', detail: `retry ${retry} reported as ${claimed}, but get_trace_summary returned ${call.status}`, tag: 'contradiction' },
+          );
+        }
+
+        const chosen = retries.length > 0 ? obtained.filter((t) => retries.includes(t.retry ?? -1)) : obtained;
+        const paths = [...new Set([...sentence.matchAll(PATH_IN_TEXT)].map((x) => x[1]!.replace(/[.,:]+$/, '')).filter((p) => !FILE_EXT.test(p)))];
+        const statuses = [...new Set([...sentence.matchAll(STATUS_IN_TEXT)].map((x) => Number(x[1])))];
+        const marker = MARKER_CLAIM.exec(sentence);
+        const link = LINK_CLAIM.exec(sentence);
+        const changed = STATUS_CHANGED_CLAIM.exec(sentence)?.[1]?.toLowerCase() === 'true' ? true : STATUS_CHANGED_CLAIM.test(sentence) || UNCHANGED_CLAIM.test(sentence) ? false : CHANGED_CLAIM.test(sentence) ? true : null;
+        const fetched = FETCHED_STATUS_CLAIM.exec(sentence);
+        const created = TEST_CREATED_CLAIM.exec(sentence);
+        const createdNegated = created ? NEGATION_BEFORE.test(sentence.slice(0, created.index)) : false;
+        const noBackend = NO_BACKEND_CLAIM.test(sentence);
+        const absence = ABSENCE_CLAIM.exec(sentence);
+        const complete = COMPLETE_CLAIM.exec(sentence);
+        const networkClaim = (paths.length > 0 && statuses.length > 0) || marker || link || changed !== null || fetched || (created && !createdNegated) || noBackend;
+        if (!networkClaim && !absence && !complete) continue;
+
+        if (chosen.length === 0) {
+          // Nothing to compare with: the claim rests on trace evidence the session never obtained.
+          if (networkClaim) add({ id: id('claim', sentence.slice(0, 60)), status: 'fail', detail: `trace claim without obtained trace evidence (${callStatuses(retries.length ? all.filter((t) => retries.includes(t.retry ?? -1)) : all)}): "${quoteOf(sentence)}"`, tag: 'unsupported' });
+          continue;
+        }
+        const requests = chosen.flatMap((t) => t.output.network?.requests ?? []);
+        const backend = chosen.flatMap((t) => t.output.backendFetches?.items ?? []);
+        const fulfillments = chosen.flatMap((t) => t.output.routes?.fulfillments ?? []);
+        const linked = fulfillments.filter((f) => f.fetch.link === 'linked');
+        const complete_ = (t: (typeof chosen)[number]) =>
+          t.status === 'ok' && (t.output.network?.omitted.overLimit ?? 0) === 0 && (t.output.network?.omitted.notRetained ?? 0) === 0 && t.output.backendFetches?.total === t.output.backendFetches?.returned;
+        const allComplete = chosen.every(complete_);
+        const anyPartial = chosen.some((t) => t.status === 'partial' || t.output.coverage?.countsAreLowerBounds === true);
+        const where = callStatuses(chosen);
+
+        // Request path and HTTP status.
+        if (paths.length === 1 && statuses.length === 1) {
+          const [p, s] = [paths[0]!, statuses[0]!];
+          const records = [...requests, ...backend].filter((r) => samePath(p, r.path));
+          if (records.some((r) => r.status === s)) add({ id: id('status', `${p} ${s}`), status: 'pass', detail: `${p} with status ${s} is in the summary (${where})`, tag: 'consistent' });
+          else if (records.length > 0) {
+            add({ id: id('status', `${p} ${s}`), status: 'fail', detail: `claims ${p} returned ${s}; the summary shows ${records.map((r) => r.status ?? r.result).join(', ')} (${where})`, tag: 'contradiction' });
+          } else {
+            const benignOmitted = s < 400 && chosen.some((t) => (t.output.network?.omitted.benign ?? 0) > 0);
+            add(
+              allComplete && !benignOmitted
+                ? { id: id('status', `${p} ${s}`), status: 'fail', detail: `claims ${p} returned ${s}, but no such request is in the complete summary (${where})`, tag: 'contradiction' }
+                : { id: id('status', `${p} ${s}`), status: 'review', detail: `claims ${p} returned ${s}; not listed, but the summary is partial or omits records (${where})`, tag: 'unresolved' },
+            );
+          }
+        } else if (paths.length > 0 && statuses.length > 0) {
+          for (const p of paths) {
+            const records = [...requests, ...backend].filter((r) => samePath(p, r.path));
+            if (records.length > 0 && !records.some((r) => r.status !== null && statuses.includes(r.status))) {
+              add({ id: id('status', p), status: 'review', detail: `names ${p} with statuses ${statuses.join(', ')}; the summary shows ${records.map((r) => r.status ?? r.result).join(', ')} (several values, pairing unclear)`, tag: 'unresolved' });
+            }
+          }
+        }
+
+        // Route marker.
+        if (marker) {
+          const claimed = (marker[1]?.toLowerCase() ?? (marker[2] ? 'none' : 'fulfilled')) as Request['marker'];
+          const scope = paths.length === 1 ? requests.filter((r) => samePath(paths[0]!, r.path)) : paths.length === 0 ? requests : [];
+          if (scope.some((r) => r.marker === claimed)) add({ id: id('marker', `${paths[0] ?? 'any'} ${claimed}`), status: 'pass', detail: `marker ${claimed} is in the summary (${where})`, tag: 'consistent' });
+          else if (paths.length === 1 && scope.length > 0) {
+            add({ id: id('marker', `${paths[0]} ${claimed}`), status: 'fail', detail: `claims marker ${claimed} for ${paths[0]}; the summary shows ${scope.map((r) => r.marker).join(', ')}`, tag: 'contradiction' });
+          } else if (scope.length > 0 && allComplete) {
+            add({ id: id('marker', `any ${claimed}`), status: 'fail', detail: `claims marker ${claimed}, but no request in the complete summary has it`, tag: 'contradiction' });
+          } else if (paths.length <= 1) {
+            add({ id: id('marker', `${paths[0] ?? 'any'} ${claimed}`), status: 'review', detail: `claims marker ${claimed}; the summary can't confirm it (request not listed, or the summary is partial)`, tag: 'unresolved' });
+          }
+        }
+
+        // Fetch link.
+        if (link) {
+          const claimed = (link[1] ?? link[2] ?? (link[3] ? 'none' : 'linked'))!.toLowerCase();
+          if (fulfillments.some((f) => f.fetch.link === claimed)) add({ id: id('link', claimed), status: 'pass', detail: `a fulfillment with fetch link ${claimed} is in the summary`, tag: 'consistent' });
+          else if (fulfillments.length > 0 || allComplete) {
+            add({ id: id('link', claimed), status: 'fail', detail: `claims fetch link ${claimed}; the summary shows ${fulfillments.map((f) => f.fetch.link).join(', ') || 'no route.fulfill call'}`, tag: 'contradiction' });
+          } else add({ id: id('link', claimed), status: 'review', detail: `claims fetch link ${claimed}; no fulfillment is listed in the partial summary`, tag: 'unresolved' });
+        }
+
+        // Status modification: only an identifier link proves or disproves it.
+        if (changed !== null) {
+          const label = changed ? 'changed' : 'unchanged';
+          if (linked.length === 0) {
+            add(
+              fulfillments.length === 0 && allComplete && !requests.some((r) => r.marker === 'fulfilled')
+                ? { id: id('status change', label), status: 'fail', detail: `claims the status was ${label} by a route handler, but the complete summary has no route.fulfill call`, tag: 'contradiction' }
+                : { id: id('status change', label), status: 'review', detail: `claims the status was ${label}; no fulfillment is linked to a fetch, so the trace can't show it`, tag: 'unresolved' },
+            );
+          } else if (linked.some((f) => f.fetch.link === 'linked' && f.fetch.statusChanged === changed)) {
+            add({ id: id('status change', label), status: 'pass', detail: `a linked fulfillment has statusChanged ${changed}`, tag: 'consistent' });
+          } else if (linked.every((f) => f.fetch.link === 'linked' && f.fetch.statusChanged === !changed)) {
+            add({ id: id('status change', label), status: 'fail', detail: `claims the status was ${label}; every linked fulfillment has statusChanged ${!changed}`, tag: 'contradiction' });
+          } else add({ id: id('status change', label), status: 'review', detail: `claims the status was ${label}; the linked fulfillments don't record it`, tag: 'unresolved' });
+        }
+
+        // Status the backend returned.
+        if (fetched) {
+          const s = Number(fetched[1] ?? fetched[2]);
+          const seen = [...linked.map((f) => (f.fetch.link === 'linked' ? f.fetch.fetchedStatus : null)), ...backend.map((b) => b.status)].filter((x): x is number => x !== null);
+          if (seen.includes(s)) add({ id: id('fetched status', String(s)), status: 'pass', detail: `a backend fetch returned ${s}`, tag: 'consistent' });
+          else if (seen.length > 0 && allComplete) add({ id: id('fetched status', String(s)), status: 'fail', detail: `claims the backend returned ${s}; the summary shows ${seen.join(', ')}`, tag: 'contradiction' });
+          else add({ id: id('fetched status', String(s)), status: 'review', detail: `claims the backend returned ${s}; the summary can't confirm it`, tag: 'unresolved' });
+        }
+
+        // "Test-created": a fulfilled marker alone is not proof; a pass-through link disproves it.
+        if (created && !createdNegated) {
+          const unlinkedOwnBody = fulfillments.some((f) => f.fetch.link === 'none' && f.bodyProvided);
+          if (linked.some((f) => f.fetch.link === 'linked' && f.fetch.statusChanged === true)) {
+            add({ id: id('origin', 'test-created'), status: 'pass', detail: 'a linked fulfillment shows the test changed the status', tag: 'consistent' });
+          } else if (unlinkedOwnBody) {
+            add({ id: id('origin', 'test-created'), status: 'pass', detail: 'consistent with an unlinked fulfillment that supplied its own body (the trace does not prove who made the body)', tag: 'consistent' });
+          } else if (linked.length > 0 && linked.length === fulfillments.length && linked.every((f) => f.fetch.link === 'linked' && f.fetch.statusChanged === false)) {
+            add({ id: id('origin', 'test-created'), status: 'fail', detail: 'claims a test-created response, but every fulfillment reused a backend fetch with its status unchanged', tag: 'contradiction' });
+          } else if (fulfillments.length === 0 && allComplete && !requests.some((r) => r.marker === 'fulfilled')) {
+            add({ id: id('origin', 'test-created'), status: 'fail', detail: 'claims a test-created response, but the complete summary has no route.fulfill call and no fulfilled request', tag: 'contradiction' });
+          } else add({ id: id('origin', 'test-created'), status: 'review', detail: 'claims a test-created response; the trace summary alone can neither show nor rule it out', tag: 'unresolved' });
+        }
+
+        // "No backend fetch": an unlinked fulfillment does not prove it; backendFetches can disprove it.
+        if (noBackend) {
+          const total = chosen.reduce((n, t) => n + (t.output.backendFetches?.total ?? 0), 0);
+          if (total > 0) add({ id: id('backend', 'none claimed'), status: 'fail', detail: `claims no backend fetch, but the summary records ${total} API-context fetch(es)`, tag: 'contradiction' });
+          else if (allComplete) add({ id: id('backend', 'none claimed'), status: 'pass', detail: 'no backend fetch in the complete summary', tag: 'consistent' });
+          else add({ id: id('backend', 'none claimed'), status: 'review', detail: 'claims no backend fetch; the summary is partial, so its absence is not shown', tag: 'unresolved' });
+        }
+
+        // Absence claims: a partial read cannot show that something did not happen.
+        if (absence) {
+          const what = absence[1]!.toLowerCase();
+          const present = /page ?error/.test(what)
+            ? chosen.some((t) => (t.output.pageErrors?.count ?? 0) > 0)
+            : /console/.test(what)
+              ? chosen.some((t) => (t.output.console?.counts.error ?? 0) > 0)
+              : /failed/.test(what)
+                ? requests.some((r) => r.result === 'failed')
+                : requests.some((r) => r.result === 'failed' || (r.status ?? 0) >= 400);
+          if (present) add({ id: id('absence', what), status: 'fail', detail: `claims ${absence[0]}, but the summary records some`, tag: 'contradiction' });
+          else if (anyPartial) add({ id: id('absence', what), status: 'review', detail: `claims ${absence[0]}; the summary is partial, so their absence is not shown`, tag: 'unresolved' });
+          else add({ id: id('absence', what), status: 'pass', detail: `none in the complete summary`, tag: 'consistent' });
+        }
+
+        // Completeness.
+        if (complete) {
+          add(
+            chosen.some((t) => t.status === 'partial')
+              ? { id: id('completeness', 'complete'), status: 'fail', detail: `describes the trace as complete, but get_trace_summary returned partial (${where})`, tag: 'contradiction' }
+              : { id: id('completeness', 'complete'), status: 'pass', detail: 'the summary is complete', tag: 'consistent' },
+          );
+        }
+      }
+    }
+  }
+  if (items.length === 0) return check('trace_consistency', 'not_applicable', 'no structured trace claims cite get_trace_summary');
+  return fromItems('trace_consistency', items, 'every structured trace claim agrees with the get_trace_summary results');
+}
+
+type Request = NonNullable<TraceSummary['network']>['requests'][number];
+
+function quoteOf(t: string): string {
+  return t.length > 120 ? `${t.slice(0, 117)}...` : t;
 }
 
 // ---------------------------------------------------------------------------

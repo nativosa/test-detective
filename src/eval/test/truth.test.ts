@@ -29,6 +29,17 @@ describe('GroundTruth', () => {
     rejects(variant((t) => (t.notes = 'x')), /unrecognized_keys/);
   });
 
+  test('trace observations (scorer v8): optional, trace evidence only, no marker on backend fetches', () => {
+    const withTrace = (observations: unknown[], kind = 'trace') =>
+      variant((t) => t.requiredEvidence.push({ kind, refPattern: '^test-results/.+/trace\\.zip$', why: 'x', provisional: false, observations }));
+    const ok = GroundTruth.safeParse(withTrace([{ path: '^/api/profile$', status: 500, marker: 'none' }, { source: 'backend', path: '^/api/profile$', status: 500 }]));
+    assert.equal(ok.success, true, JSON.stringify(ok.error?.issues));
+    assert.equal(ok.data!.requiredEvidence.at(-1)!.observations![0]!.source, 'browser', 'browser is the default source');
+    rejects(withTrace([{ path: '^/x$' }], 'source'), /observations apply to trace evidence only/);
+    rejects(withTrace([{ source: 'backend', path: '^/x$', marker: 'fulfilled' }]), /backend fetches carry no route marker/);
+    rejects(withTrace([]), /too_small/);
+  });
+
   test('rejects an invalid regular expression', () => {
     rejects(variant((t) => (t.rootCause.criteria[0].anyOf = ['('])), /valid regular expression/);
   });

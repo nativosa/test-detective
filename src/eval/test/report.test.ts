@@ -308,7 +308,7 @@ describe('combined report over several runs', () => {
     assert.deepEqual(new Set(s.evaluations.map((e) => e.runId)), new Set(['part-a', 'part-b']));
     assert.deepEqual(s.scorerVersions, [SCORER_VERSION]);
     assert.match(md, /^Combined from 2 runs: part-a \(.*\); part-b \(.*\)\. Each run's own files are unchanged\.$/m);
-    assert.match(md, /^\| Evaluation \| Run \| Scorer \| Truth sha256 \| Skill sha256 \| Snapshot \| Duration \(s\) \|/m);
+    assert.match(md, /^\| Evaluation \| Run \| Scorer \| Truth sha256 \| Skill sha256 \| Model \| MCP server \| Snapshot \| Duration \(s\) \|/m);
     const again = await reportCombined([a, b], out);
     assert.equal(again.markdown, md, 'deterministic, and a previous combined summary may be replaced');
   });

@@ -78,6 +78,8 @@ export type FakeRunOptions = {
   durationMs?: number;
   /** The reported test: its file relative to tests/ and its title. Default S02's login test. */
   test?: { file: string; title: string };
+  /** Bytes of a failed attempt's trace.zip (e.g. a real synthetic trace). Default a placeholder. */
+  traceBody?: (retry: number) => Buffer;
 };
 
 const FILES = { trace: 'trace.zip', screenshot: 'test-failed-1.png', 'error-context': 'error-context.md' } as const;
@@ -109,7 +111,7 @@ export function fakePlaywright(options: FakeRunOptions = {}, runs: PlaywrightRun
       if (status !== 'passed') {
         for (const name of names) {
           const file = path.join(resultsDir, retry === 0 ? FILES[name] : `retry${retry}-${FILES[name]}`);
-          const body = name === 'error-context' ? `error-context bytes${options.errorContextExtra ?? ''}` : `${name} bytes`;
+          const body = name === 'error-context' ? `error-context bytes${options.errorContextExtra ?? ''}` : name === 'trace' && options.traceBody ? options.traceBody(retry) : `${name} bytes`;
           if (!options.missingFiles?.includes(name)) await writeFile(file, body);
           attachments.push({ name, contentType: TYPES[name], path: file });
         }

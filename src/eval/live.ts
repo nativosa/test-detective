@@ -10,6 +10,7 @@ import type { CliArgs } from '../agent/args.ts';
 import type { InvestigationResult } from '../agent/result.ts';
 import { runInvestigation } from '../agent/run.ts';
 import type { QueryFn } from '../agent/run.ts';
+import { SERVER_VERSION } from '../mcp/server.ts';
 import { defaultRepoState } from './generate.ts';
 import { describeDifferences, evalQuery, leakMarkers, sessionOptions } from './isolation.ts';
 import type { IsolationContext } from './isolation.ts';
@@ -175,7 +176,7 @@ export async function runLiveEvaluation(request: LiveRequest, deps: LiveDeps): P
     finishedAt: now().toISOString(),
     harness: { status: 'setup_failed', detail: 'setup did not complete' },
     args,
-    preflight: { capturedAt: null, truthSha256: null, skillSha256: null, settingsSha256: null, sdkVersion: null, nodeVersion: process.version, session: null },
+    preflight: { capturedAt: null, truthSha256: null, skillSha256: null, settingsSha256: null, sdkVersion: null, mcpServerVersion: null, nodeVersion: process.version, session: null },
     snapshot: null,
     workspace: null,
     repo: { unchanged: null },
@@ -194,6 +195,7 @@ export async function runLiveEvaluation(request: LiveRequest, deps: LiveDeps): P
     outcome.preflight.truthSha256 = sha256(truthText);
     outcome.preflight.capturedAt = now().toISOString();
     outcome.preflight.sdkVersion = deps.sdkVersion !== undefined ? deps.sdkVersion : await installedSdkVersion(deps.repoRoot);
+    outcome.preflight.mcpServerVersion = SERVER_VERSION;
     const [skill, settings] = await Promise.all(CONFIG_FILES.map((rel) => readFile(path.join(deps.repoRoot, ...rel.split('/')))));
     outcome.preflight.skillSha256 = sha256(skill!);
     outcome.preflight.settingsSha256 = sha256(settings!);

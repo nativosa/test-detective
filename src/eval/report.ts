@@ -1,7 +1,7 @@
 import * as z from 'zod';
 import { CLASSIFICATIONS } from '../agent/result.ts';
 import type { RunManifest } from './runs.ts';
-import { ACCEPTANCE_STATUSES, acceptanceOf, CATEGORIES, CHECK_IDS, CHECK_STATUSES, CLASSIFICATION_VERDICTS, ELIGIBLE_CATEGORIES } from './score.ts';
+import { ACCEPTANCE_STATUSES, acceptanceOf, CATEGORIES, CHECK_IDS, CHECK_STATUSES, CLASSIFICATION_VERDICTS, ELIGIBLE_CATEGORIES, TRACE_ACQUISITIONS, TRACE_CALL_STATUSES } from './score.ts';
 import type { Category, CheckId, CheckStatus, ClassificationVerdict, ScoreRecord } from './score.ts';
 import { CONFIDENCE_LEVELS } from './truth.ts';
 
@@ -20,7 +20,7 @@ import { CONFIDENCE_LEVELS } from './truth.ts';
  * `classification` only for a reviewable alternative: a reviewer decides whether that alternative
  * is defensible. An exact, incorrect or abstained verdict is never changed by review.
  */
-export const REVIEWABLE_CHECKS = ['coverage', 'classification', 'root_cause', 'evidence_validity', 'evidence_sufficiency', 'citations', 'recommendation'] as const satisfies readonly CheckId[];
+export const REVIEWABLE_CHECKS = ['coverage', 'classification', 'root_cause', 'evidence_validity', 'evidence_sufficiency', 'citations', 'trace_consistency', 'recommendation'] as const satisfies readonly CheckId[];
 
 const Review = z.strictObject({
   evalId: z.string().regex(/^S\d{2}-\d{2}$/),
@@ -82,6 +82,9 @@ const Metrics = z.strictObject({
     requiredVerified: Fraction,
     requiredAccessDenied: z.number().int().describe('Required evidence never obtained because every read was denied (scorer v7)'),
     citations: z.strictObject({ verified: z.number().int(), unresolved: z.number().int(), unsupported: z.number().int(), confirmedFalse: z.number().int(), accessDenied: z.number().int() }),
+    traceClaims: z
+      .strictObject({ consistent: z.number().int(), contradictions: z.number().int(), retryMismatches: z.number().int(), withoutTraceEvidence: z.number().int(), unresolved: z.number().int() })
+      .describe('trace_consistency items: structured trace claims compared with get_trace_summary results (scorer v8)'),
   }),
   rootCause: z.strictObject({
     passed: Fraction,
@@ -134,6 +137,15 @@ export const Summary = z.strictObject({
     )
     .describe('Automatic results grouped by the scenario failure type ("unknown" for scores before version 6); counts only'),
   truthVersions: z.array(z.strictObject({ scenarioId: z.string(), truthSha256: z.array(z.string()), consistent: z.boolean() })),
+  traceEvidence: z
+    .strictObject({
+      tests: z.number().int().describe('Expected tests with a recorded trace acquisition (scores from version 8)'),
+      acquisition: counts(TRACE_ACQUISITIONS).describe('mcp: get_trace_summary ok/partial; bash: the trace file read by a tool call; not_obtained: kept but never obtained; no_trace: none kept'),
+      notRecorded: z.number().int().describe('Evaluations without a trace record (scored before version 8, or not scored diagnostically)'),
+      toolStatuses: counts(TRACE_CALL_STATUSES).describe('get_trace_summary calls by result'),
+      limitations: z.array(z.strictObject({ evalId: z.string(), test: z.string(), limitation: z.string() })),
+    })
+    .describe('How trace evidence was obtained, over all evaluations; descriptive, not an acceptance criterion'),
   skillVersions: z
     .array(z.strictObject({ skillSha256: z.string().nullable(), evaluations: z.array(z.string()) }))
     .describe('Investigator Skill (outcome.json preflight.skillSha256) per evaluation; null = not recorded. More than one is flagged'),
@@ -166,6 +178,8 @@ export const Summary = z.strictObject({
       scorerVersion: z.number().int(),
       truthSha256: z.string().nullable(),
       skillSha256: z.string().nullable().describe('The Skill the session ran with (outcome.json preflight); null = not recorded'),
+      model: z.string().nullable().describe('Model ID the session reported; null = not recorded (scores before version 8)'),
+      mcpServerVersion: z.string().nullable().describe('test-detective MCP server version; null = not recorded'),
       snapshotFingerprint: z.string().nullable(),
       usage: Usage.describe("This evaluation's metrics from score.json"),
       auditCounts: z.strictObject({ violations: z.number().int(), suspicious: z.number().int(), dismissed: z.number().int() }),
@@ -196,6 +210,7 @@ export const Summary = z.strictObject({
       auditExpected: z.array(z.string()).describe('Recognized SDK-internal tool calls (informational)'),
       auditDismissed: z.array(z.string()).describe('Audit findings that cannot have caused access, with the reason (informational)'),
       cleanup: z.strictObject({ status: z.string(), attempts: z.number().int().nullable(), retried: z.number().int(), error: z.string().nullable() }),
+      traceAcquisition: z.array(z.strictObject({ test: z.string(), acquisition: z.enum(TRACE_ACQUISITIONS), summaries: z.array(z.string()) })).nullable(),
     }),
   ),
   infrastructure: z
@@ -309,6 +324,7 @@ export function aggregate(manifest: RunManifest, scores: Scored[], reviews: Revi
       .flatMap((v) => v.record.classification.tests.filter((t) => t.highConfidenceIncorrect).map((t) => ({ evalId: v.record.evalId, test: t.title, predicted: t.predicted!, expected: v.record.classification.expected! }))),
     byFailureType: byFailureType(automaticViews),
     truthVersions: truthVersions(scores.map((s) => s.record)),
+    traceEvidence: traceEvidence(scores.map((s) => s.record)),
     skillVersions: skillVersions(scores),
     usage: usage(scores.map((s) => s.record)),
     reliability: reliability(reviewedViews),
@@ -320,6 +336,8 @@ export function aggregate(manifest: RunManifest, scores: Scored[], reviews: Revi
       scorerVersion: record.scorerVersion,
       truthSha256: record.inputs.truthSha256,
       skillSha256: scores[i]!.skillSha256 ?? null,
+      model: record.inputs.model,
+      mcpServerVersion: record.inputs.mcpServerVersion,
       snapshotFingerprint: record.inputs.snapshotFingerprint,
       usage: {
         wallClockMs: record.metrics.wallClockMs,
@@ -344,6 +362,8 @@ export function aggregate(manifest: RunManifest, scores: Scored[], reviews: Revi
       auditExpected: record.audit.expected.map((e) => `${e.tool} ${e.toolUseId}: ${e.detail}`),
       auditDismissed: record.audit.dismissed.map((e) => `${e.kind} ${e.tool} ${e.toolUseId}: ${e.detail}`),
       cleanup: { status: record.cleanup.status, attempts: record.cleanup.attempts, retried: record.cleanup.transient.length, error: record.cleanup.error },
+      traceAcquisition:
+        record.traceEvidence?.tests.map((t) => ({ test: t.title, acquisition: t.acquisition, summaries: t.summaries.map((x) => `retry ${x.retry ?? '?'}: ${x.status}${x.reasons.length ? ` (${x.reasons.join(', ')})` : ''}`) })) ?? null,
     })),
     infrastructure: {
       cleanup: Object.fromEntries(
@@ -389,7 +409,8 @@ function metrics(views: View[]): Metrics {
   for (const v of eligible) if (v.acceptance.status !== 'not_eligible') acceptance[v.acceptance.status]++;
 
   const checks: Record<string, Record<CheckStatus, number>> = Object.fromEntries(CHECK_IDS.map((id) => [id, zero(CHECK_STATUSES)]));
-  for (const v of eligible) for (const id of CHECK_IDS) checks[id]![v.checks[id]]++;
+  // A score from before a check existed (trace_consistency before version 8) counts it as not applicable.
+  for (const v of eligible) for (const id of CHECK_IDS) checks[id]![v.checks[id] ?? 'not_applicable']++;
 
   const items = (id: CheckId) => eligible.flatMap((v) => v.record.checks.find((c) => c.id === id)?.items ?? []);
   const tagCount = (id: CheckId, tag: string) => items(id).filter((i) => i.tag === tag).length;
@@ -428,6 +449,13 @@ function metrics(views: View[]): Metrics {
         confirmedFalse: tagCount('citations', 'confirmed_false'),
         accessDenied: tagCount('citations', 'access_denied'),
       },
+      traceClaims: {
+        consistent: tagCount('trace_consistency', 'consistent'),
+        contradictions: tagCount('trace_consistency', 'contradiction'),
+        retryMismatches: tagCount('trace_consistency', 'retry_mismatch'),
+        withoutTraceEvidence: tagCount('trace_consistency', 'unsupported'),
+        unresolved: tagCount('trace_consistency', 'unresolved'),
+      },
     },
     rootCause: {
       passed: passed('root_cause'),
@@ -441,6 +469,22 @@ function metrics(views: View[]): Metrics {
       forbiddenHits: tagCount('recommendation', 'forbidden'),
     },
   });
+}
+
+function traceEvidence(records: ScoreRecord[]): Summary['traceEvidence'] {
+  const acquisition = zero(TRACE_ACQUISITIONS);
+  const toolStatuses = zero(TRACE_CALL_STATUSES);
+  const limitations: Summary['traceEvidence']['limitations'] = [];
+  let tests = 0;
+  for (const r of records) {
+    for (const t of r.traceEvidence?.tests ?? []) {
+      tests++;
+      acquisition[t.acquisition]++;
+      for (const x of t.summaries) toolStatuses[x.status]++;
+      for (const limitation of t.limitations) limitations.push({ evalId: r.evalId, test: t.title, limitation });
+    }
+  }
+  return { tests, acquisition, notRecorded: records.filter((r) => r.traceEvidence === null).length, toolStatuses, limitations };
 }
 
 function usage(records: ScoreRecord[]): Summary['usage'] {
@@ -572,6 +616,7 @@ export function renderSummary(summary: Summary): string {
     `- Root cause check passed ${frac(m.rootCause.passed)} (criteria matched ${frac(m.rootCause.criteriaMatched)}, suspicious claims ${m.rootCause.forbiddenHits}, unsupported definitive claims ${m.rootCause.definitiveClaims}); recommendation passed ${frac(m.recommendation.passed)} (suspicious ${m.recommendation.forbiddenHits})`,
     `- Evidence claims: verified ${m.evidence.claims.verified}, unresolved provenance ${m.evidence.claims.unresolved}, unsupported ${m.evidence.claims.unsupported}, confirmed false ${m.evidence.claims.confirmedFalse}, false "not available" ${m.evidence.claims.falseUnavailable}, access denied ${m.evidence.claims.accessDenied}; required evidence verified ${frac(m.evidence.requiredVerified)} (access denied ${m.evidence.requiredAccessDenied})`,
     `- Citations: verified ${m.evidence.citations.verified}, unresolved ${m.evidence.citations.unresolved}, unsupported ${m.evidence.citations.unsupported}, confirmed false ${m.evidence.citations.confirmedFalse}, access denied ${m.evidence.citations.accessDenied}`,
+    `- Trace claims vs get_trace_summary: consistent ${m.evidence.traceClaims.consistent}, contradictions ${m.evidence.traceClaims.contradictions}, retry mismatches ${m.evidence.traceClaims.retryMismatches}, without trace evidence ${m.evidence.traceClaims.withoutTraceEvidence}, unresolved ${m.evidence.traceClaims.unresolved}`,
   ];
   out.push('## Diagnostic metrics (eligible runs only)', '', '**Automatic:**', ...block(a), '');
   if (summary.reviewed) out.push(`**After human review** (${summary.reviews.applied} review(s) applied):`, ...block(summary.reviewed), '');
@@ -598,6 +643,17 @@ export function renderSummary(summary: Summary): string {
   out.push('', '## Checks (automatic, eligible runs)', '', `| Check | ${CHECK_STATUSES.join(' | ')} |`, `|---|${CHECK_STATUSES.map(() => '---').join('|')}|`);
   for (const id of CHECK_IDS) out.push(`| ${id} | ${CHECK_STATUSES.map((s) => a.checks[id]![s]).join(' | ')} |`);
 
+  const te = summary.traceEvidence;
+  out.push(
+    '',
+    '## Trace evidence acquisition (all evaluations, descriptive)',
+    '',
+    `Per expected test: obtained through MCP (get_trace_summary ok/partial) ${te.acquisition.mcp}, through Bash (trace file read) ${te.acquisition.bash}, both ${te.acquisition.mcp_and_bash}, not obtained ${te.acquisition.not_obtained}, no trace kept ${te.acquisition.no_trace}` +
+      `${te.notRecorded > 0 ? `; ${te.notRecorded} evaluation(s) without a record (scored before version 8 or not scored diagnostically)` : ''}.`,
+    '',
+    `get_trace_summary results: ${TRACE_CALL_STATUSES.filter((st) => te.toolStatuses[st] > 0).map((st) => `${st} ${te.toolStatuses[st]}`).join(', ') || 'no calls'}.`,
+  );
+  if (te.limitations.length > 0) out.push('', '**Coverage limitations of the trace evidence:**', ...te.limitations.map((l) => `- ${l.evalId} "${l.test}": ${l.limitation}`));
   out.push(
     '',
     '## Evaluations',
@@ -622,6 +678,9 @@ export function renderSummary(summary: Summary): string {
     if (e.acceptance.blockers.length > 0) out.push('', `**Not accepted because:** ${e.acceptance.blockers.join('; ')}`);
     else if (e.acceptance.pending.length > 0) out.push('', `**Acceptance pending review of:** ${e.acceptance.pending.join(', ')}`);
     if (e.reviewReasons.length > 0) out.push('', '**For manual review:**', ...e.reviewReasons.map((r) => `- ${r}`));
+    if (e.traceAcquisition && e.traceAcquisition.length > 0) {
+      out.push('', `Trace evidence: ${e.traceAcquisition.map((t) => `"${t.test}" ${t.acquisition.replaceAll('_', ' ')}${t.summaries.length ? ` (get_trace_summary ${t.summaries.join('; ')})` : ''}`).join('; ')}`);
+    }
     if (e.auditExpected.length > 0) out.push('', '**Recognized SDK tool calls (not audit findings):**', ...e.auditExpected.map((x) => `- ${x}`));
     if (e.auditDismissed.length > 0) out.push('', '**Dismissed audit findings (no access possible):**', ...e.auditDismissed.map((x) => `- ${x}`));
     if (e.cleanup.status === 'failed') out.push('', `**Infrastructure: workspace NOT removed** (${e.cleanup.error ?? 'no detail'}). Scoring is unaffected; remove it once no process uses it.`);
@@ -644,14 +703,14 @@ export function renderSummary(summary: Summary): string {
     '',
     '## Provenance and usage per evaluation',
     '',
-    '| Evaluation | Run | Scorer | Truth sha256 | Skill sha256 | Snapshot | Duration (s) | Wall clock (s) | Turns | Tokens in / out | Tool calls | Est. cost (USD) | Audit (violations / suspicious / dismissed) | Cleanup |',
-    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+    '| Evaluation | Run | Scorer | Truth sha256 | Skill sha256 | Model | MCP server | Snapshot | Duration (s) | Wall clock (s) | Turns | Tokens in / out | Tool calls | Est. cost (USD) | Audit (violations / suspicious / dismissed) | Cleanup |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
   );
   for (const e of summary.evaluations) {
     const u = e.usage;
     const secs = (ms: number) => (ms / 1000).toFixed(1);
     out.push(
-      `| ${e.evalId} | ${e.runId} | v${e.scorerVersion} | ${e.truthSha256?.slice(0, 12) ?? '–'} | ${e.skillSha256?.slice(0, 12) ?? 'not recorded'} | ${e.snapshotFingerprint ?? '–'} | ${v(u.durationMs, secs)} | ${v(u.wallClockMs, secs)} | ${v(u.numTurns)} | ${v(u.inputTokens)} / ${v(u.outputTokens)} | ${v(u.toolCalls)} | ${v(u.estimatedUsageCostUsd, (c) => c.toFixed(4))} | ${e.auditVerdict} (${e.auditCounts.violations} / ${e.auditCounts.suspicious} / ${e.auditCounts.dismissed}) | ${e.cleanup.status.replaceAll('_', ' ')} |`,
+      `| ${e.evalId} | ${e.runId} | v${e.scorerVersion} | ${e.truthSha256?.slice(0, 12) ?? '–'} | ${e.skillSha256?.slice(0, 12) ?? 'not recorded'} | ${e.model ?? 'not recorded'} | ${e.mcpServerVersion ?? 'not recorded'} | ${e.snapshotFingerprint ?? '–'} | ${v(u.durationMs, secs)} | ${v(u.wallClockMs, secs)} | ${v(u.numTurns)} | ${v(u.inputTokens)} / ${v(u.outputTokens)} | ${v(u.toolCalls)} | ${v(u.estimatedUsageCostUsd, (c) => c.toFixed(4))} | ${e.auditVerdict} (${e.auditCounts.violations} / ${e.auditCounts.suspicious} / ${e.auditCounts.dismissed}) | ${e.cleanup.status.replaceAll('_', ' ')} |`,
     );
   }
 

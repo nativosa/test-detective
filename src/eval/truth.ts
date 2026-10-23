@@ -12,7 +12,9 @@ import { loadScenarioFile, RegexSource, ScenarioId, SCENARIOS_DIR, TRUTH_FILE } 
 // exception is a forbidden claim marked `severity: "fail"`: an unhedged match fails (see score.ts).
 //
 // Fields added in Stage 2.6 (tests[].reportedOutcome, unavailableEvidence, reviewableAlternatives,
-// severity) are optional; leaving them out keeps the Stage 2.5 meaning.
+// severity) are optional; leaving them out keeps the Stage 2.5 meaning. So is Stage 3.4's
+// requiredEvidence[].observations: without it, a trace obtained through get_trace_summary needs only
+// to be read in full (status ok).
 
 const Investigation = ModelReport.shape.investigations.element;
 /** The CLI's own evidence kinds and confidence levels, so truth files can't drift from them. */
@@ -49,6 +51,15 @@ const Forbidden = z.strictObject({
 });
 
 const uniqueIds = (items: { id: string }[]) => new Set(items.map((i) => i.id)).size === items.length;
+
+/** A fact a get_trace_summary result must contain for the trace requirement to be met through MCP. */
+const TraceObservation = z.strictObject({
+  source: z.enum(['browser', 'backend']).default('browser').describe('network.requests (browser) or backendFetches (API request contexts)'),
+  path: RegexSource.describe('Matched against the sanitized request path'),
+  status: z.number().int().min(100).max(599).optional(),
+  marker: z.enum(['fulfilled', 'continued', 'aborted', 'none', 'unknown']).optional().describe('Browser requests only'),
+});
+export type TraceObservation = z.infer<typeof TraceObservation>;
 
 export const GroundTruth = z
   .strictObject({
@@ -99,6 +110,11 @@ export const GroundTruth = z
         refPattern: RegexSource.describe('Matched against the evidence ref (repo-relative path or MCP tool name)'),
         why: z.string().min(1),
         provisional: z.boolean().describe('True until confirmed against generated artifacts (e.g. trace contents)'),
+        observations: z
+          .array(TraceObservation)
+          .min(1)
+          .optional()
+          .describe('Trace requirements only: facts a get_trace_summary result must contain for the requirement to be met through MCP (Stage 3.4)'),
       }),
     ),
     recommendations: z.strictObject({
@@ -126,6 +142,12 @@ export const GroundTruth = z
     const unavailable = expected.unavailableEvidence ?? [];
     if (truth.requiredEvidence.some((r) => unavailable.includes(r.kind))) {
       ctx.addIssue({ code: 'custom', path: ['expected', 'unavailableEvidence'], message: 'evidence cannot be both required and unavailable' });
+    }
+    for (const [i, r] of truth.requiredEvidence.entries()) {
+      if (r.observations && r.kind !== 'trace') ctx.addIssue({ code: 'custom', path: ['requiredEvidence', i, 'observations'], message: 'observations apply to trace evidence only' });
+      if (r.observations?.some((o) => o.source === 'backend' && o.marker !== undefined)) {
+        ctx.addIssue({ code: 'custom', path: ['requiredEvidence', i, 'observations'], message: 'backend fetches carry no route marker' });
+      }
     }
     if (!investigates && unavailable.length > 0) {
       ctx.addIssue({ code: 'custom', path: ['expected', 'unavailableEvidence'], message: `status ${expected.reportStatus} has no evidence to be unavailable` });

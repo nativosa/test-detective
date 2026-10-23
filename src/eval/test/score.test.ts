@@ -49,7 +49,8 @@ describe('classification verdicts (no partial credit)', () => {
       tests: [{ title: 'signs in with valid credentials', file: 'tests/ui/login.spec.ts', testId: only(r).testId, predicted: 'Test-code defect', confidence: 'High', verdict: 'exact', highConfidenceIncorrect: false, outcome: 'unexpected' }],
     });
     assert.ok(!('credit' in r.classification));
-    for (const c of r.checks) assert.equal(c.status, 'pass', `${c.id}: ${c.detail}`);
+    // A session without get_trace_summary makes no trace claims to compare (scorer v8).
+    for (const c of r.checks) assert.equal(c.status, c.id === 'trace_consistency' ? 'not_applicable' : 'pass', `${c.id}: ${c.detail}`);
   });
 
   test('incorrect and abstained are distinct verdicts', () => {
@@ -208,11 +209,11 @@ describe('evidence provenance', () => {
       {
         name: 'noTrace',
         about: 'trace reported as not available',
-        session: (f) => {
+        session: async (f) => {
           const inv = correctInvestigation(f);
           inv.evidence = inv.evidence.map((e) => (e.kind === 'trace' ? { ...e, status: 'not_available', note: 'No trace attachment' } : e));
           // The correct stream with its final report swapped.
-          return { messages: [...VARIANTS.correct!.session(f).messages.slice(0, -1), successWith(inv)] };
+          return { messages: [...(await VARIANTS.correct!.session(f)).messages.slice(0, -1), successWith(inv)] };
         },
       },
       path.join(dir, 'work'),
