@@ -35,11 +35,8 @@ export const ALLOWED_TOOLS = [
   'Grep',
   'Glob',
   ...MCP_TOOLS,
-  // The investigate-failure Skill's read-only commands, nothing broader.
-  'Bash(unzip -l *)',
-  'Bash(unzip -p *)',
-  'Bash(grep *)',
-  'Bash(head *)',
+  // The Skill's only shell command: `ls -l` for source modification times. Traces are read only
+  // through get_trace_summary; raw archive access (unzip, and grep/head that filtered it) is gone.
   'Bash(ls *)',
 ];
 
@@ -56,6 +53,7 @@ export const DENY_RULES = [
   'Bash(curl *)',
   'Bash(wget *)',
   'Bash(rm *)',
+  'Bash(unzip *)',
 ];
 
 const SYSTEM_APPEND = `You are running inside the test-detective CLI, non-interactively. Nobody can answer questions.
@@ -71,7 +69,10 @@ Follow the investigate-failure skill exactly, then return its report ONLY as the
   "Proposed fix" -> proposedFix, "Verification steps" -> verificationSteps.
   Trace facts taken from a get_trace_summary result: evidence kind "trace", ref "get_trace_summary", and name the retry
   and the trace status in the note; cite "get_trace_summary" in evidenceRefs. Never mark trace evidence inspected
-  unless a get_trace_summary result (status ok or partial) or a trace command actually returned it.
+  unless a get_trace_summary result (status ok or partial) actually returned it.
+Before you submit, check that the structured output is one complete JSON object that matches the schema: only its fields,
+every required field present, enum values spelled exactly, and evidence, analysis and verificationSteps not empty in any
+investigation. Submit it only when it is complete.
 Do not restate the test title, file, line, project, outcome or attempts: the CLI reads those from the MCP results itself.`;
 
 /**

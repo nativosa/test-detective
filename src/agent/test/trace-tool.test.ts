@@ -72,7 +72,7 @@ describe('get_trace_summary: authorized for investigations, unavailable elsewher
     assert.deepEqual(BUILTIN_TOOLS, ['Read', 'Grep', 'Glob', 'Bash', 'Skill']);
     assert.deepEqual(
       ALLOWED_TOOLS.filter((tool) => !tool.startsWith('mcp__')),
-      ['Read', 'Grep', 'Glob', 'Bash(unzip -l *)', 'Bash(unzip -p *)', 'Bash(grep *)', 'Bash(head *)', 'Bash(ls *)'],
+      ['Read', 'Grep', 'Glob', 'Bash(ls *)'],
     );
     assert.deepEqual(DISALLOWED_TOOLS, ['Edit', 'Write', 'NotebookEdit', 'PowerShell', 'WebFetch', 'WebSearch', 'Agent']);
     assert.equal(options.permissionMode, 'dontAsk');

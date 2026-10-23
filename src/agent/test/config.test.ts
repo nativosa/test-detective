@@ -14,23 +14,18 @@ describe('buildQueryOptions: permission surface', () => {
     assert.deepEqual(o.disallowedTools, ['Edit', 'Write', 'NotebookEdit', 'PowerShell', 'WebFetch', 'WebSearch', 'Agent']);
   });
 
-  test('dontAsk with an exact allowlist: three MCP tools and the Skill\'s Bash patterns', () => {
+  test('dontAsk with an exact allowlist: three MCP tools and the Skill\'s one Bash pattern', () => {
     const o = options();
     assert.equal(o.permissionMode, 'dontAsk');
-    assert.deepEqual(o.allowedTools, [
-      'Read',
-      'Grep',
-      'Glob',
-      MCP_LIST,
-      MCP_DETAILS,
-      MCP_TRACE,
-      'Bash(unzip -l *)',
-      'Bash(unzip -p *)',
-      'Bash(grep *)',
-      'Bash(head *)',
-      'Bash(ls *)',
-    ]);
+    assert.deepEqual(o.allowedTools, ['Read', 'Grep', 'Glob', MCP_LIST, MCP_DETAILS, MCP_TRACE, 'Bash(ls *)']);
     assert.ok(!o.allowedTools!.some((t) => t === 'Bash' || t === 'Bash(*)' || t.startsWith('mcp__test-detective__*')));
+  });
+
+  test('raw trace archive access is not approved, and unzip is denied in every mode', () => {
+    const o = options();
+    for (const rule of ['Bash(unzip -l *)', 'Bash(unzip -p *)', 'Bash(grep *)', 'Bash(head *)']) assert.ok(!o.allowedTools!.includes(rule), rule);
+    assert.ok(!o.allowedTools!.some((t) => /^Bash\((unzip|grep|head|cat|tail|zipinfo|7z|tar)\b/.test(t)));
+    assert.ok((o.settings as { permissions: { deny: string[] } }).permissions.deny.includes('Bash(unzip *)'));
   });
 
   test('the Skill tool is scoped to investigate-failure by the skills option, never allowed bare', () => {
@@ -91,6 +86,12 @@ describe('buildQueryOptions: permission surface', () => {
     assert.equal(sp.preset, 'claude_code');
     assert.match(sp.append, /structured output/);
     assert.doesNotMatch(sp.append, /Step 1|Step 2|unzip/, 'the investigation procedure stays in the Skill');
+  });
+
+  test('system prompt asks for one complete, schema-valid JSON report and no trace commands', () => {
+    const { append } = options().systemPrompt as { append: string };
+    assert.match(append, /Before you submit, check that the structured output is one complete JSON object that matches the schema/);
+    assert.doesNotMatch(append, /trace command/);
   });
 
   test('system prompt says git is unavailable, and the git deny rule still stands', () => {

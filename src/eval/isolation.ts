@@ -12,7 +12,7 @@ import type { LeakMarkers, Workspace } from './workspace.ts';
 // Evaluation session isolation. Two parts, and neither is a sandbox:
 // - Mitigation: point the unchanged production session (runInvestigation + buildQueryOptions) at a
 //   workspace, and only ADD deny rules. Read deny rules cover Read/Grep/Glob; nothing stops Bash
-//   (`grep`, `head`, `ls`, `unzip`) from taking an absolute path elsewhere on the machine.
+//   (`ls`, the only allowed command since Stage 3.6) from taking an absolute path elsewhere on the machine.
 // - Detection: audit the raw transcript afterwards for canaries, ground-truth references and tool
 //   paths outside the workspace. A clean audit means nothing was SEEN, not that nothing leaked.
 

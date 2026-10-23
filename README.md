@@ -113,7 +113,7 @@ The server registers this tool only when it is started with `--enable-trace-summ
 - `missing`: no readable trace for this attempt.
 - `unsupported`: the archive is invalid or hostile, or the trace format isn't verified (only format `version: 10`, Playwright 1.64, is).
 
-**How the statuses are used.** Only `ok` and `partial` results are trace evidence. The Skill reports `missing` as not available (missing), uses `partial` only for what is listed and lowers its confidence when the deciding evidence may be in the unread part, and falls back to its restricted Bash commands for `unsupported` or when the tool is unavailable, denied or fails. The CLI marks a report `unverified` if it cites `get_trace_summary` for a test without an observed `ok`/`partial` result for that test and report. Scorer v8 grades the same way (`evals/README.md`, "Scorer version 8").
+**How the statuses are used.** Only `ok` and `partial` results are trace evidence. The Skill reports `missing` as not available (missing), uses `partial` only for what is listed and lowers its confidence when the deciding evidence may be in the unread part, and reports the trace as present but not inspectable (with the reason, and lowered confidence) for `unsupported` or when the tool is unavailable, denied or fails. Since Stage 3.6 there is no Bash fallback: the Skill never reads the archive another way and never says an uninspected trace contains or lacks an event. The CLI marks a report `unverified` if it cites `get_trace_summary` for a test without an observed `ok`/`partial` result for that test and report. Scorer v8 grades the same way (`evals/README.md`, "Scorer version 8").
 
 **Supported formats and browsers.** Trace format `version: 10` only, verified with Playwright 1.64.1 (`SUPPORTED_TRACE_VERSIONS` in `src/mcp/trace.ts`). Every context in the archive must declare the same version; mixed, missing or other versions return `unsupported` with a reason code, never a guess. A Playwright upgrade that changes the format makes summaries `unsupported` until the parser is checked against it. Contexts are reported with `browser` `chromium`, `firefox` or `webkit` (anything else is `null`), but only Chromium traces have been exercised: this suite has one `chromium` project, and the synthetic test traces and evaluation snapshots are all Chromium. Firefox and WebKit traces use the same format and should parse, but are unverified.
 
@@ -129,7 +129,7 @@ The server registers this tool only when it is started with `--enable-trace-summ
 - The tool is read-only and takes no path from the client. It only opens the trace attachment of the requested attempt in the current report, inside the repo (symlinks resolved first).
 - The ZIP layer and parser are defensive against malformed and hostile archives (see "What it reads" and "Budgets"), but they are bounded best-effort code, not a sandbox. A budget stop yields `partial`, not an error.
 - What the tool returns is sent to the model provider as part of the session, like every other tool result. Its allowlist limits what that includes; redaction is heuristic (above).
-- The tool is not the only way into a trace. While the Skill's Bash fallback (`unzip -p … | grep … | head`) is allowed, a session can still read raw trace lines, which may contain headers, cookies or bodies. `Read` can open any workspace file. The permission rules that limit this are Claude Code runtime restrictions, not an OS sandbox (see [Read-only configuration](#read-only-configuration)).
+- The tool is the only *approved* way into a trace. Stage 3.6 removed the Skill's Bash fallback and its permissions (`unzip -l`, `unzip -p`, `grep`, `head`), and the CLI denies `unzip` in every mode, so a session can no longer pipe raw trace lines (which may contain headers, cookies or bodies) through Bash. `Read` and `Grep` are still allowed on any workspace file, the archive included; its entries are normally compressed, so that doesn't yield trace lines, but it isn't a permission boundary, and the Skill forbids it. All of this is Claude Code runtime restrictions, not an OS sandbox (see [Read-only configuration](#read-only-configuration)).
 - Observations are not verdicts (below). Correlations without matching identifiers are reported as such, never resolved by the tool.
 
 **Observations, not classifications.** The tool never says what kind of defect a failure is. In particular:
@@ -219,12 +219,12 @@ Output is Markdown with observed facts and model analysis in separate sections, 
 These are **runtime restrictions enforced by Claude Code, not an OS sandbox**:
 
 - Only `Read`, `Grep`, `Glob`, `Bash` and `Skill` exist as built-in tools. Edit, Write, NotebookEdit, PowerShell, WebFetch, WebSearch and Agent are removed. `skills: ['investigate-failure']` limits the Skill tool to that one skill: the SDK turns it into a `Skill(investigate-failure)` allow rule and hides every other skill from the listing. It does not add the Skill tool itself. Without `Skill` in `tools`, the skill is discovered but can't be invoked, and the model ends up reading `SKILL.md` as a file (run status `unverified`).
-- `permissionMode: 'dontAsk'` with an exact allowlist: the three test-detective MCP tools and the Skill's read-only Bash patterns (`unzip -l`, `unzip -p`, `grep`, `head`, `ls`). Anything else is denied, not prompted.
-- Deny rules for `git`, `npm`, `npx`, `node`, `playwright`, `curl`, `wget` and `rm` apply in every mode.
+- `permissionMode: 'dontAsk'` with an exact allowlist: `Read`, `Grep`, `Glob`, the three test-detective MCP tools and one Bash pattern, `ls` (the Skill's `ls -l` modification-time check). Anything else is denied, not prompted. Until Stage 3.6 it also allowed `unzip -l`, `unzip -p`, `grep` and `head` for a raw trace fallback; traces are now read only through `get_trace_summary`.
+- Deny rules for `git`, `npm`, `npx`, `node`, `playwright`, `curl`, `wget`, `rm` and `unzip` apply in every mode.
 - Skill shell injections are disabled, auto memory is off, and the session is not persisted to disk.
 - The CLI compares `git status` before and after the run and warns if anything changed (detection, not prevention).
 
-Limits worth knowing: `grep`, `ls` and `unzip` can read any file your user can read. Network access isn't blocked at the OS level. Claude Code talks to the model provider, and the MCP server and Node aren't sandboxed.
+Limits worth knowing: `Read`, `Grep` and `ls` can read (or list) any file your user can read. Network access isn't blocked at the OS level. Claude Code talks to the model provider, and the MCP server and Node aren't sandboxed.
 
 ### Authentication and cost
 
