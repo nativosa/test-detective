@@ -45,6 +45,35 @@ Linux system dependencies (`--with-deps`) will be handled when CI is introduced.
 | `npm run investigate` | Investigate existing failures with the Agent SDK CLI (uses your Claude account, see [below](#investigation-cli-agent-sdk)) |
 | `npm run test:agent` | Offline tests for the CLI (no model requests; fake SDK streams and a fake Claude Code process) |
 
+## UI test suite
+
+18 tests in 17 spec files under `tests/ui/`, one feature per file, all against the live demo site (so `npm test` needs network access):
+
+| Spec | Behavior covered |
+|---|---|
+| `checkboxes` | Checks and unchecks the two checkboxes |
+| `javascript-alerts` | Accepts a JS confirm dialog and checks the result text |
+| `login` | Form authentication with valid credentials |
+| `dropdown` | Selects an option |
+| `dynamic-loading` | Waits for content rendered after a delay |
+| `add-remove-elements` | Adds three elements, then removes them one by one, checking the count |
+| `broken-images` | Checks which of the three images loaded (two are broken by design) |
+| `challenging-dom` (2 tests) | Clicking a button re-renders it with a new random id. A table row located by its content can be edited |
+| `context-menu` | A right-click raises a JS alert with the expected message |
+| `dynamic-controls` | Removes and restores a checkbox through its asynchronous transitions |
+| `file-upload` | Selects a fixture file and submits the form. The POST is answered locally (mocked) |
+| `file-download` | Clicking a listed file downloads it. The file response is mocked with known name and content |
+| `hovers` | Hovering an avatar reveals that user's name and profile link only |
+| `horizontal-slider` | Arrow keys and End move the slider, and the displayed value follows |
+| `inputs` | A number input accepts a typed value and steps it with ArrowUp |
+| `multiple-windows` | Opens a new window, checks it, closes it and returns to the original page |
+| `sortable-tables` | Sorts a table by last name, ascending then descending |
+
+Notes on the shared, public site:
+
+- **Upload (mocked, no server-side change).** Real uploads become publicly listed on the site's download page. So `file-upload` loads the real page and selects the synthetic fixture `tests/fixtures/test-detective-upload.txt`, but `page.route` answers every POST locally and none reaches the site. The test checks the selected file (name and content), the intercepted request (one multipart POST to `/upload` with the `file` field and filename), and the result page. That result page is built by the route from the filename the browser submitted. Chromium leaves file bytes out of intercepted request bodies, which is why the content is checked on the selected file rather than in the request.
+- **Download (mocked, deterministic).** The download page lists files that visitors uploaded, so their names and contents change. `file-download` loads the real listing and clicks its first link. `page.route` answers every `/download/<file>` request with a fixed name (`test-detective-download.txt`) and fixed content, and the test checks the requested URL, the suggested filename and the downloaded content. The listing still has to contain at least one link, but no visitor file's name or content is used. Playwright keeps the file in its own temporary directory, never in the repo.
+
 ## Test artifacts
 
 | Path | Contents |
@@ -257,6 +286,7 @@ The reported **estimated usage cost** is the SDK's own estimate at list prices (
 
 ```
 tests/ui/             UI specs, one file per feature area
+tests/fixtures/       Files used by UI specs (the synthetic upload fixture)
 src/mcp/              MCP server: report.ts (parsing), paths.ts (path safety), trace-summary.ts, trace.ts and zip.ts (get_trace_summary), server.ts (tools), main.ts (stdio)
 src/mcp/test/         node:test unit and protocol tests, with synthetic report fixtures and synthetic trace archives
 src/agent/            Agent SDK CLI: args.ts, auth.ts, config.ts (SDK options), result.ts (Zod types, Markdown), run.ts (session), main.ts (entry)

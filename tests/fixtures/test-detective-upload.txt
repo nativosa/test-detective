@@ -1,0 +1,2 @@
+test-detective upload fixture.
+Synthetic, non-sensitive content used by tests/ui/file-upload.spec.ts.
