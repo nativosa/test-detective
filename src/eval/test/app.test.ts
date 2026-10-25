@@ -60,6 +60,17 @@ describe('fixture app', () => {
     assert.match(html, /role="alert" id="error" hidden/);
   });
 
+  test('help page links to the user guide in a new window', async (t) => {
+    const { url } = await app(t, { profileApi: 'ok' });
+    const help = await (await fetch(`${url}/help`)).text();
+    assert.match(help, /<h1>Help<\/h1>/);
+    assert.match(help, /<a href="\/help\/guide" target="_blank">Open the user guide<\/a>/);
+    assert.doesNotMatch(help, /<h1>User guide<\/h1>/);
+    const guide = await fetch(`${url}/help/guide`);
+    assert.equal(guide.status, 200);
+    assert.match(await guide.text(), /<h1>User guide<\/h1>/);
+  });
+
   test('unknown paths are 404', async (t) => {
     const { url } = await app(t, { profileApi: 'ok' });
     assert.equal((await fetch(`${url}/nope`)).status, 404);

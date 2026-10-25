@@ -9,6 +9,8 @@ import { parseArgs } from 'node:util';
 //   GET  /login         login form (Username, Password, "Log in" button)
 //   POST /login         valid credentials -> 303 /profile, otherwise 401 with an alert
 //   GET  /profile       page that loads /api/profile in the browser
+//   GET  /help          help page with a link that opens /help/guide in a new window
+//   GET  /help/guide    user guide page
 //   GET  /api/profile   by profileApi mode:
 //                         ok          200 JSON (after profileDelayMs, if set)
 //                         error       500
@@ -76,6 +78,8 @@ async function handle(config: AppConfig, state: AppState, req: http.IncomingMess
     return send(res, 401, 'text/html', loginPage('Invalid username or password.'));
   }
   if (route === 'GET /profile') return send(res, 200, 'text/html', PROFILE_PAGE);
+  if (route === 'GET /help') return send(res, 200, 'text/html', HELP_PAGE);
+  if (route === 'GET /help/guide') return send(res, 200, 'text/html', GUIDE_PAGE);
   if (route === 'GET /api/profile') {
     state.profileRequests += 1;
     const failed = config.profileApi === 'error' || (config.profileApi === 'fail-first' && state.profileRequests === 1);
@@ -159,6 +163,19 @@ const PROFILE_PAGE = layout(
       document.getElementById('status').hidden = true;
     });
 </script>`,
+);
+
+const HELP_PAGE = layout(
+  'Help',
+  `<h1>Help</h1>
+<p>Step-by-step instructions for using the portal are in the user guide.</p>
+<p><a href="/help/guide" target="_blank">Open the user guide</a></p>`,
+);
+
+const GUIDE_PAGE = layout(
+  'User guide',
+  `<h1>User guide</h1>
+<p>Sign in with your username and password, then open Profile to see your details.</p>`,
 );
 
 // Manual use: node evals/app/server.ts [--profile-api ok|error|fail-first|hang] [--profile-delay-ms n] [--port n]

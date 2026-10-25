@@ -1,0 +1,125 @@
+{
+  "id": "S12",
+  "canary": "TDCANARY-53da46b2-03ef-4f29-b68f-7033e4b7fb0c",
+  "description": "Synthetic, deterministic. The Help page's 'Open the user guide' link (target=_blank) opens /help/guide in a new window (a popup of the test's page), which renders the h1 'User guide'. The test clicks the link but never captures the popup, then asserts the 'User guide' heading on the original page, which still shows the Help page. The app behaves correctly; the assertion targets the wrong page. A control that captures the popup with page.waitForEvent('popup') and asserts on it passes against the same app. failureType incorrect_locator is the closest existing type: the selector itself is correct (it matches the popup's heading); the defect is the Page object it is evaluated on. The popup screenshot (test-failed-2.png) and get_trace_summary (pages: 2, GET /help/guide 200) corroborate that the popup opened, but are not required.",
+  "failureType": "incorrect_locator",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [
+      {
+        "title": "opens the user guide",
+        "file": "tests/ui/help.spec.ts"
+      }
+    ],
+    "classification": "Test-code defect",
+    "acceptableAlternatives": [],
+    "sourceMismatch": false,
+    "confidence": [
+      "High",
+      "Medium"
+    ]
+  },
+  "rootCause": {
+    "summary": "The link opens the user guide in a new window (popup), but toBeVisible on getByRole('heading', { name: 'User guide' }) runs against the original page, which still shows the Help page, so the heading is never found there.",
+    "criteria": [
+      {
+        "id": "new-window",
+        "description": "Recognizes that the link opens a new window, tab or popup",
+        "anyOf": [
+          "popup",
+          "new (browser )?(window|tab|page)",
+          "(separate|second|another|other) (browser )?(window|tab|page)",
+          "target=['\"]?_blank"
+        ]
+      },
+      {
+        "id": "wrong-page",
+        "description": "Says the assertion targets the original page instead of the popup",
+        "anyOf": [
+          "original (page|tab|window)",
+          "opener",
+          "(wrong|first|initial|parent|same|old) (page|tab|window)",
+          "help page",
+          "(page|tab|window) (object|fixture|context)",
+          "(never|not) (captured|awaited|referenced|switched)",
+          "waitForEvent\\(['\"]popup['\"]\\)"
+        ]
+      },
+      {
+        "id": "guide-heading",
+        "description": "Names the 'User guide' heading the assertion looks for",
+        "anyOf": [
+          "user guide"
+        ]
+      }
+    ],
+    "forbiddenClaims": [
+      {
+        "id": "popup-not-opened",
+        "description": "Claims the link or new window did not open",
+        "pattern": "(popup|new (window|tab|page)|link|guide) (was |is )?(never|not|did not|didn't|failed to) (open|load|appear|navigate)"
+      },
+      {
+        "id": "app-broken",
+        "description": "Claims the guide page, the link or the app is broken",
+        "pattern": "(user guide|guide page|help page|link|application|app|server|backend) (is |was )?(broken|down|failing|missing)"
+      },
+      {
+        "id": "timing",
+        "description": "Blames timing or slowness",
+        "pattern": "race condition|too slow|loads? slowly|needs? more time|did not (load|render) in time"
+      }
+    ]
+  },
+  "requiredEvidence": [
+    {
+      "kind": "mcp",
+      "refPattern": "get_failure_details",
+      "why": "Failure data must come from the MCP tools: toBeVisible on getByRole('heading', { name: 'User guide' }) failed with element(s) not found",
+      "provisional": false
+    },
+    {
+      "kind": "source",
+      "refPattern": "^tests/ui/help\\.spec\\.ts$",
+      "why": "The spec clicks the link and asserts on page, with no popup capture",
+      "provisional": false
+    },
+    {
+      "kind": "error_context",
+      "refPattern": "^test-results/.+/error-context\\.md$",
+      "why": "Confirmed (Playwright 1.64.1): the page snapshot shows the original page, heading \"Help\" [level=1] and link \"Open the user guide\", and no 'User guide' heading",
+      "provisional": false
+    }
+  ],
+  "recommendations": {
+    "acceptable": [
+      {
+        "id": "capture-popup",
+        "description": "Capture the popup (page.waitForEvent('popup') or context.waitForEvent('page')) and assert on it",
+        "anyOf": [
+          "waitForEvent\\(['\"](popup|page)['\"]\\)",
+          "on\\(['\"]popup['\"]",
+          "popup\\.getByRole",
+          "(capture|wait for|await|get|use|switch to|assert on|target) (the )?(popup|new (page|window|tab))"
+        ]
+      }
+    ],
+    "forbidden": [
+      {
+        "id": "sleep",
+        "description": "Adds a fixed wait",
+        "pattern": "waitForTimeout|\\bsleep\\b"
+      },
+      {
+        "id": "more-time",
+        "description": "Raises timeouts",
+        "pattern": "increase (the )?(test |expect |action |navigation )?timeout"
+      },
+      {
+        "id": "change-app",
+        "description": "Changes the app so the guide opens in the same window",
+        "pattern": "(remove|drop|delete) .{0,30}target|target=['\"]?_self"
+      }
+    ]
+  }
+}

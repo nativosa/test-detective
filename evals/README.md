@@ -2,7 +2,7 @@
 
 Controlled Playwright failures with ground truth, used to measure how accurately, reliably and cheaply test-detective diagnoses failures. This stage evaluates the existing investigation (the `investigate-failure` Skill run by the Agent SDK CLI) as the baseline. It adds no investigation features.
 
-**Status: Stage 3.6 (retrospective).** Stage 2.5 built the schemas, the fixture app, three pilot scenarios (S02, S04, S05), snapshot generation and storage, investigation workspaces with isolation checks, offline scoring and reporting, the live adapter, and a one-run-per-scenario pilot benchmark. Stage 2.6.1 adds seven scenarios (S01, S03, S06–S10) aimed at timing, environment, flaky, inconclusive, source-mismatch and no-failure cases, plus the fixture modes, generation options, observation checks and control runs they need. Their snapshots are generated offline. Stage 2.6.2 added scorer version 6 for them (see "Scorer version 6" below). Four of them (S08, S07, S03, S09) were then run live once each; scorer version 7 followed from what those runs exposed (see "Scorer version 7"). Stage 3 added structured trace evidence (`get_trace_summary`), scorer version 8 and one more live run each of S07, S05 and S04 (see "Stage 3.5 live runs").
+**Status: Stage 3.6 (retrospective).** Stage 2.5 built the schemas, the fixture app, three pilot scenarios (S02, S04, S05), snapshot generation and storage, investigation workspaces with isolation checks, offline scoring and reporting, the live adapter, and a one-run-per-scenario pilot benchmark. Stage 2.6.1 adds seven scenarios (S01, S03, S06–S10) aimed at timing, environment, flaky, inconclusive, source-mismatch and no-failure cases, plus the fixture modes, generation options, observation checks and control runs they need. Their snapshots are generated offline. Stage 2.6.2 added scorer version 6 for them (see "Scorer version 6" below). Four of them (S08, S07, S03, S09) were then run live once each; scorer version 7 followed from what those runs exposed (see "Scorer version 7"). Stage 3 added structured trace evidence (`get_trace_summary`), scorer version 8 and one more live run each of S07, S05 and S04 (see "Stage 3.5 live runs"). After Stage 3.6, S12 added a test that works with a second browser page (see "What the S12 artifacts contain"). It has a snapshot and a control but has not been run live.
 
 ## Layout
 
@@ -35,7 +35,7 @@ src/eval/
 
 Scenario specs live outside the main config's `testDir` (`./tests`), so `npm test` never runs them. A test in `test:eval` checks this.
 
-The pilot scenarios are S02, S04 and S05; Stage 2.6 added S01, S03 and S06–S10. The expected answers are only in each scenario's `truth.json` (and, as corrected tests, in `control/`). Don't repeat them in docs, specs, comments, file names or test titles.
+The pilot scenarios are S02, S04 and S05; Stage 2.6 added S01, S03 and S06–S10; S12 followed Stage 3.6 (S11 and S13 are not assigned). The expected answers are only in each scenario's `truth.json` (and, as corrected tests, in `control/`). Don't repeat them in docs, specs, comments, file names or test titles.
 
 ## Generation data vs ground truth
 
@@ -129,6 +129,23 @@ Observations that matter for the scenarios:
 - **S06's artifacts carry almost no page evidence:** a blank screenshot and no page snapshot. The error message and the trace's navigation failure are the evidence.
 - Every snapshot also contains `test-results/.last-run.json` (Playwright's own file).
 
+### What the S12 artifacts contain (Playwright 1.64.1, Chromium, two independent generations)
+
+The spec clicks a `target="_blank"` link on `/help`, which opens `/help/guide` as a second page in the same browser context. Both generations gave identical facts (only the report fingerprint differs):
+
+| | S12 |
+|---|---|
+| Fixture | `ok` (the `/help` pages don't depend on the profile mode) |
+| Attempts | `failed` (10 s expect timeout), `tests/ui/help.spec.ts:8` |
+| Top error | `toBeVisible` on `getByRole('heading', { name: 'User guide' })`, `element(s) not found` |
+| error-context page | heading `Help`, link `Open the user guide` (the page the test started on) |
+| Screenshots | **two**: `test-failed-1.png` shows `/help`, `test-failed-2.png` shows `/help/guide` with its `User guide` heading. Playwright captures every page of the context on failure. |
+| `get_trace_summary` retry 0 | `ok`, coverage complete; browser context `pages: 2`, `requests: 2`: document `GET /help` 200 and document `GET /help/guide` 200, both before the failure; no routes, page errors or console messages |
+
+**What the trace summary can't show.** It counts pages per context but doesn't attribute requests, or the failed `Frame.expect`, to a page. So it shows that a second page existed and that `/help/guide` loaded, but not which page the failed check ran on. The error-context snapshot and the first screenshot show that page, the second screenshot shows the other one, and the spec shows which page object the check uses. S12's required evidence is therefore `get_failure_details`, the spec and `error-context.md`. The second screenshot and `get_trace_summary` corroborate that the popup opened but are optional.
+
+**Failure type.** S12 uses `incorrect_locator`, the closest existing type. The selector itself is well-formed and matches the popup's heading; the defect is the `Page` object the locator is created on (the original page instead of the popup), not a malformed selector. The truth schema has no separate page-context type, and none was added.
+
 ### Synthetic vs naturally occurring failures
 
 Every scenario failure is **synthetic and deterministic**: the fixture app or the generator injects it, and each generation reproduces it identically, which the observation checks enforce.
@@ -144,11 +161,11 @@ npm run eval -- control --scenario S03   # Playwright + local fixture app only; 
 
 A control is the scenario's test, corrected (`control/<spec>`). It runs in a fresh `.work/` stage with the scenario's own fixture behavior and Playwright settings, and must pass on the first attempt with exit code 0 and no global errors, without changing repo state. It writes nothing. A passing control shows the failure comes from what the correction changed, not from a broken fixture, which supports the ground truth independently of any model.
 
-Controls are answers, so they are evaluation-side data: the generator never reads `control/` (`separation.test.ts`), the stage that becomes a snapshot never contains it, and no snapshot or workspace ever does. S01, S03 and S09 have controls (a dataset test requires them).
+Controls are answers, so they are evaluation-side data: the generator never reads `control/` (`separation.test.ts`), the stage that becomes a snapshot never contains it, and no snapshot or workspace ever does. S01, S03, S09 and S12 have controls (a dataset test requires them).
 
 ## Fixture app
 
-`node evals/app/server.ts [--profile-api ok|error|fail-first|hang] [--profile-delay-ms n] [--port n]` starts it manually. The generator starts it in-process and passes the fault mode itself, so the mode never appears in a spec or in anything copied to an investigation workspace. `fail-first` counts per started server, so each generated run starts at the first request. `hang` never answers `/api/profile`; closing the server drops the connection.
+`node evals/app/server.ts [--profile-api ok|error|fail-first|hang] [--profile-delay-ms n] [--port n]` starts it manually. The generator starts it in-process and passes the fault mode itself, so the mode never appears in a spec or in anything copied to an investigation workspace. `fail-first` counts per started server, so each generated run starts at the first request. `/help` (a page with a link that opens `/help/guide` in a new window) and `/help/guide` are served in every mode. `hang` never answers `/api/profile`; closing the server drops the connection.
 
 ## Scoring is heuristic
 

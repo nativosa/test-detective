@@ -1,0 +1,21 @@
+{
+  "id": "S12",
+  "spec": "tests/ui/help.spec.ts",
+  "app": {
+    "profileApi": "ok"
+  },
+  "playwright": {
+    "retries": 0,
+    "testTimeoutMs": 15000
+  },
+  "expectObservation": {
+    "outcome": "unexpected",
+    "errorPattern": "toBeVisible\\(\\) failed[\\s\\S]*getByRole\\('heading', \\{ name: 'User guide' \\}\\)",
+    "attachments": [
+      "trace",
+      "screenshot",
+      "error-context"
+    ],
+    "errorContextPattern": "heading \"Help\""
+  }
+}
