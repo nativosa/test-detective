@@ -14,15 +14,24 @@ import { parseArgs } from 'node:util';
 //   GET  /team          team page: each member's name and profile link are shown while their photo is hovered
 //   GET  /team/<slug>   member profile page (404 for unknown members)
 //   GET  /settings      "Email notifications" checkbox; "Reset preferences" replaces it with a new, unchecked one
+//   GET  /reports       reports page with a "Download monthly report" link to /reports/monthly.csv
 //   GET  /api/profile   by profileApi mode:
 //                         ok          200 JSON (after profileDelayMs, if set)
 //                         error       500
 //                         fail-first  500 for this server's first request, 200 afterwards
 //                         hang        never answers (the connection is dropped on close)
+//   GET  /reports/monthly.csv  by reportsApi mode (default ok):
+//                         ok          200 CSV attachment (monthly-report.csv)
+//                         unavailable 503 HTML error page, no attachment
 
 export const PROFILE_API_MODES = ['ok', 'error', 'fail-first', 'hang'] as const;
+export const REPORTS_API_MODES = ['ok', 'unavailable'] as const;
 export const MAX_PROFILE_DELAY_MS = 5_000;
-export type AppConfig = { profileApi: (typeof PROFILE_API_MODES)[number]; profileDelayMs?: number };
+export type AppConfig = {
+  profileApi: (typeof PROFILE_API_MODES)[number];
+  profileDelayMs?: number;
+  reportsApi?: (typeof REPORTS_API_MODES)[number];
+};
 export type RunningApp = { url: string; close: () => Promise<void> };
 
 export const USER = { username: 'demo', password: 'demo-password', name: 'Dana Demo', email: 'dana@example.test' };
@@ -89,6 +98,11 @@ async function handle(config: AppConfig, state: AppState, req: http.IncomingMess
     if (member) return send(res, 200, 'text/html', memberPage(member));
   }
   if (route === 'GET /settings') return send(res, 200, 'text/html', SETTINGS_PAGE);
+  if (route === 'GET /reports') return send(res, 200, 'text/html', REPORTS_PAGE);
+  if (route === 'GET /reports/monthly.csv') {
+    if (config.reportsApi === 'unavailable') return send(res, 503, 'text/html', REPORT_UNAVAILABLE_PAGE);
+    return send(res, 200, 'text/csv', MONTHLY_REPORT_CSV, { 'content-disposition': 'attachment; filename="monthly-report.csv"' });
+  }
   if (route === 'GET /api/profile') {
     state.profileRequests += 1;
     const failed = config.profileApi === 'error' || (config.profileApi === 'fail-first' && state.profileRequests === 1);
@@ -100,8 +114,8 @@ async function handle(config: AppConfig, state: AppState, req: http.IncomingMess
   send(res, 404, 'text/plain', 'Not found');
 }
 
-function send(res: http.ServerResponse, status: number, type: string, body: string): void {
-  res.writeHead(status, { 'content-type': `${type}; charset=utf-8`, 'cache-control': 'no-store' });
+function send(res: http.ServerResponse, status: number, type: string, body: string, headers: Record<string, string> = {}): void {
+  res.writeHead(status, { 'content-type': `${type}; charset=utf-8`, 'cache-control': 'no-store', ...headers });
   res.end(body);
 }
 
@@ -241,18 +255,49 @@ const SETTINGS_PAGE = layout(
 </script>`,
 );
 
-// Manual use: node evals/app/server.ts [--profile-api ok|error|fail-first|hang] [--profile-delay-ms n] [--port n]
+const REPORTS_PAGE = layout(
+  'Reports',
+  `<h1>Reports</h1>
+<p><a href="/reports/monthly.csv">Download monthly report</a></p>`,
+);
+
+export const MONTHLY_REPORT_CSV = 'month,orders,revenue\n2026-10,42,1234.50\n';
+
+// A bare error page, as a failing upstream service would send it (no portal layout).
+const REPORT_UNAVAILABLE_PAGE = `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Service Unavailable</title></head>
+<body>
+<h1>Service Unavailable</h1>
+<p>The report service is temporarily unavailable.</p>
+</body>
+</html>`;
+
+// Manual use: node evals/app/server.ts [--profile-api ok|error|fail-first|hang] [--profile-delay-ms n] [--reports-api ok|unavailable] [--port n]
 if (import.meta.main) {
   const { values } = parseArgs({
-    options: { 'profile-api': { type: 'string', default: 'ok' }, 'profile-delay-ms': { type: 'string', default: '0' }, port: { type: 'string', default: '0' } },
+    options: {
+      'profile-api': { type: 'string', default: 'ok' },
+      'profile-delay-ms': { type: 'string', default: '0' },
+      'reports-api': { type: 'string', default: 'ok' },
+      port: { type: 'string', default: '0' },
+    },
   });
   const mode = values['profile-api'];
   if (!PROFILE_API_MODES.some((m) => m === mode)) {
     console.error(`--profile-api must be one of: ${PROFILE_API_MODES.join(', ')}`);
     process.exit(2);
   }
+  const reports = values['reports-api'];
+  if (!REPORTS_API_MODES.some((m) => m === reports)) {
+    console.error(`--reports-api must be one of: ${REPORTS_API_MODES.join(', ')}`);
+    process.exit(2);
+  }
   const delay = Number(values['profile-delay-ms']);
-  const app = await startApp({ profileApi: mode as AppConfig['profileApi'], profileDelayMs: delay }, Number(values.port));
-  console.log(`fixture app listening on ${app.url} (profileApi: ${mode}, profileDelayMs: ${delay})`);
+  const app = await startApp(
+    { profileApi: mode as AppConfig['profileApi'], profileDelayMs: delay, reportsApi: reports as AppConfig['reportsApi'] },
+    Number(values.port),
+  );
+  console.log(`fixture app listening on ${app.url} (profileApi: ${mode}, profileDelayMs: ${delay}, reportsApi: ${reports})`);
   process.on('SIGINT', () => void app.close().then(() => process.exit(0)));
 }

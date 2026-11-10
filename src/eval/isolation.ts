@@ -29,6 +29,7 @@ export const EVAL_ONLY_STRINGS = [
   'TDCANARY-',
   'expectObservation',
   'profileApi',
+  'reportsApi',
   'acceptableAlternatives',
   'requiredEvidence',
   'forbiddenClaims',

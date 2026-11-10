@@ -1,0 +1,240 @@
+{
+  "id": "S13",
+  "canary": "TDCANARY-c33d15b4-ca83-421a-aea7-62b7b874e834",
+  "description": "Synthetic, deterministic. The fixture serves /reports (200) with a 'Download monthly report' link to /reports/monthly.csv; in this scenario's fixture mode the real local server answers that URL with HTTP 503 and a bare HTML 'Service Unavailable' page, without a Content-Disposition attachment. No route, mock or fulfillment is involved. The test waits for a download event and clicks the link, which is a correct way to download the file: in Chromium the 503 HTML response is a navigation, so the browser shows the error page, no download event fires, and the test ends at the 15 s test timeout ('page.waitForEvent: Test timeout of 15000ms exceeded', 'waiting for event \"download\"', reported at the waitForEvent line 7). The identical spec passed against the healthy mode (200 text/csv attachment) in the isolated Playwright 1.64.1 feasibility run, with the correct filename and contents; there is no formal control, as for S04. The 503 status and the absence of route interception are visible only through get_trace_summary (document GET /reports/monthly.csv, status 503, marker none, no interception patterns or route calls); error-context and the screenshot show the error page text. Application defect is the expected classification: the app fails to serve the report while its pages load. Environment issue is reviewable, because a 503 often means a dependency or the service itself is down; the investigator has no server logs and a single run, so whether the outage is transient stays unknown either way. The timeout is a symptom, not a timing problem.",
+  "failureType": "application_failure",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [
+      {
+        "title": "downloads the monthly report",
+        "file": "tests/ui/reports.spec.ts"
+      }
+    ],
+    "classification": "Application defect",
+    "acceptableAlternatives": [],
+    "reviewableAlternatives": [
+      {
+        "classification": "Environment issue",
+        "note": "A 503 Service Unavailable can come from where the service runs (a down dependency, deployment, overload) rather than the application code; defensible only when supported by the observed 503 and cautious about the operational cause, which the artifacts do not show. A 503 alone does not make it an environment issue",
+        "requires": {
+          "id": "cites-503-cautiously",
+          "description": "Supports it with the HTTP 503 / Service Unavailable response to the report download and states that the underlying operational cause is uncertain",
+          "anyOf": [
+            "^(?=.*(\\b503\\b|service unavailable)).*(cannot (be )?(determine|tell|confirm|know|determined|confirmed)|can't (determine|tell|confirm|know)|unclear|uncertain|unknown|not (known|clear)|(no|without) (access to )?(the )?server(-side)? logs|whether .{0,60}(transient|outage|environment|infrastructure|deploy\\w*|application|code))"
+          ]
+        }
+      }
+    ],
+    "sourceMismatch": false,
+    "confidence": [
+      "High",
+      "Medium"
+    ]
+  },
+  "rootCause": {
+    "summary": "The test correctly waits for a download and clicks the report link, but the server answers GET /reports/monthly.csv with HTTP 503 and an HTML error page instead of the CSV attachment; Chromium shows that page, no download event fires, and the test times out waiting for it.",
+    "criteria": [
+      {
+        "id": "server-503",
+        "description": "Identifies the HTTP 503 / Service Unavailable response",
+        "anyOf": [
+          "\\b503\\b",
+          "service unavailable",
+          "temporarily unavailable"
+        ]
+      },
+      {
+        "id": "report-request",
+        "description": "Points at the report download request",
+        "anyOf": [
+          "/reports/monthly\\.csv",
+          "monthly\\.csv",
+          "(report|download|csv) (url|endpoint|request|response|link|file)",
+          "download (request|url|link|endpoint|response)"
+        ]
+      },
+      {
+        "id": "error-page",
+        "description": "Recognizes that the browser showed an error page instead of downloading a file",
+        "anyOf": [
+          "error page",
+          "(shows|showed|shown|displays|displayed|renders|rendered|navigat\\w*) .{0,60}(service unavailable|error|503)",
+          "instead of (a |an |the )?(download|file|csv|attachment)"
+        ]
+      },
+      {
+        "id": "no-download",
+        "description": "Recognizes that no download event occurred",
+        "anyOf": [
+          "no download",
+          "download (event )?(never|did not|didn't|was not|wasn't|is not|isn't) (\\w+ )?(fire|fired|emitted|occur|occurred|happen|happened|start|started|triggered|raised)",
+          "never (fired|fires|emitted|started|triggered|occurred|happened|arrived)",
+          "without (a |any )?download",
+          "no ['\"]?download['\"]? event"
+        ]
+      },
+      {
+        "id": "timeout",
+        "description": "Connects the test timeout to waiting for that event",
+        "anyOf": [
+          "timed? ?out",
+          "timeout",
+          "waitForEvent",
+          "waiting for (the )?(event )?['\"]?download"
+        ]
+      },
+      {
+        "id": "test-correct",
+        "description": "Recognizes that the test's download steps are correct",
+        "anyOf": [
+          "(test|spec|test code|test logic|test's (download )?(logic|steps|code)) (is|looks|seems|itself is) (correct|fine|valid|sound|right|reasonable)",
+          "not a test(-code)? (defect|bug|problem|issue)",
+          "no (change|fix|changes) (is |are )?(needed|required) (to|in) the (test|spec)",
+          "(test|spec) (needs|requires) no (change|fix)",
+          "correctly (waits|wait|sets up|registers|listens|expects|clicks|attempts|tries)"
+        ]
+      }
+    ],
+    "forbiddenClaims": [
+      {
+        "id": "timing",
+        "description": "Blames timing or slowness",
+        "pattern": "(?<!(not|no|n't|isn't|wasn't) (a |an )?)(too slow|slow (server|download|response|network|backend)|needs? more time|(download|server|response|report) (takes|took) too long|timing (issue|problem)|race condition)"
+      },
+      {
+        "id": "claims-mock",
+        "description": "Claims the test mocked or intercepted the response",
+        "pattern": "the test (mocks|mocked|stubs|stubbed|fulfills|fulfilled|intercepts|intercepted)|(?<!(not|never|n't|nothing) (\\w+ )?)(mocked|stubbed|fulfilled|intercepted) (by|in) the test"
+      },
+      {
+        "id": "marker-proof",
+        "description": "Treats the missing fulfillment marker alone as proof of a real backend response",
+        "pattern": "(marker:? ?['\"]?none['\"]?|no (fulfillment |route )?marker) (alone |by itself )?(proves|confirms|guarantees|establishes)"
+      },
+      {
+        "id": "specific-cause",
+        "description": "States a specific server-side cause the artifacts cannot show",
+        "pattern": "(503|outage|failure|unavailability|service|server|endpoint) (is|was) (caused by|due to) (a |an |the )?(database|db|disk|memory|deploy\\w*|crash\\w*|overload\\w*|misconfig\\w*|config\\w*|dependency|upstream|bug|null)"
+      },
+      {
+        "id": "blames-locator",
+        "description": "Blames the link locator",
+        "pattern": "(locator|selector) (is |was )?(wrong|incorrect|misspelled)|wrong (link|locator|selector)|link (is |was )?(missing|not found)"
+      },
+      {
+        "id": "download-config",
+        "description": "Blames download permissions or settings",
+        "pattern": "(?<!(not|n't|no sign that|nothing suggests) (\\w+ ){0,4})(acceptDownloads (is |was )?(false|off|disabled|missing|not (set|enabled))|downloads? (permissions?|settings?|config\\w*) (is |are |was |were )?(missing|disabled|blocked|off|wrong)|downloads? (are|is|were|was) (disabled|blocked|not allowed))"
+      },
+      {
+        "id": "wait-order",
+        "description": "Claims the test listens for the download too late",
+        "pattern": "(listener|waitForEvent|wait) (was |is )?(registered|set up|started|created|attached) (too late|after the click)"
+      }
+    ]
+  },
+  "requiredEvidence": [
+    {
+      "kind": "mcp",
+      "refPattern": "get_failure_details",
+      "why": "Confirmed (Playwright 1.64.1): the top error is 'Test timeout of 15000ms exceeded.' with no location; additionalErrors[0] is 'page.waitForEvent: Test timeout of 15000ms exceeded.' with the log 'waiting for event \"download\"' at tests/ui/reports.spec.ts:7, cut at 500 characters only after the snippet (the stack line is lost)",
+      "provisional": false
+    },
+    {
+      "kind": "source",
+      "refPattern": "^tests/ui/reports\\.spec\\.ts$",
+      "why": "The spec waits for a download, clicks the report link and sets up no routing or mocking",
+      "provisional": false
+    },
+    {
+      "kind": "error_context",
+      "refPattern": "^test-results/.+/error-context\\.md$",
+      "why": "Confirmed (Playwright 1.64.1): the page snapshot at failure is the error page, heading \"Service Unavailable\" and 'The report service is temporarily unavailable.'",
+      "provisional": false
+    },
+    {
+      "kind": "trace",
+      "refPattern": "^test-results/.+/trace\\.zip$",
+      "why": "Confirmed (Playwright 1.64.1, get_trace_summary): document GET /reports/monthly.csv answered 503 'Service Unavailable' with marker none, before the failure; no interception patterns and no route calls. It is the only source of the HTTP status",
+      "provisional": false,
+      "observations": [
+        {
+          "source": "browser",
+          "path": "^/reports/monthly\\.csv$",
+          "status": 503,
+          "marker": "none"
+        }
+      ]
+    }
+  ],
+  "recommendations": {
+    "acceptable": [
+      {
+        "id": "fix-server",
+        "description": "Investigate or repair the report endpoint and its dependencies, restoring the CSV attachment response",
+        "anyOf": [
+          "(fix|investigate|debug|check|restore|repair|look into) .{0,40}(server|backend|service|api|endpoint|report|dependenc)",
+          "(restore|return|serve|deliver)\\w* .{0,40}(csv|attachment)",
+          "server(-side)? logs"
+        ]
+      },
+      {
+        "id": "check-status",
+        "description": "Optionally makes the test fail fast by checking the response status before waiting for the download",
+        "anyOf": [
+          "waitForResponse",
+          "response\\.(status|ok)\\(\\)",
+          "toBeOK",
+          "(assert|check|verify|expect)\\w* .{0,40}(response )?status"
+        ]
+      },
+      {
+        "id": "keep-test",
+        "description": "States the test itself needs no change",
+        "anyOf": [
+          "no (change|fix|changes) (is |are )?(needed|required) (to|in) the (test|spec)",
+          "(test|spec) (is|looks|itself is) correct",
+          "(test|spec) (needs|requires) no (change|fix)"
+        ]
+      }
+    ],
+    "forbidden": [
+      {
+        "id": "mock-it",
+        "description": "Mocks the download so the test passes",
+        "pattern": "(?<!(not|n't|never|avoid|without|instead of|rather than|no need to) (\\w+ ){0,4})(page\\.route|route\\.fulfill|mock (the )?(api|endpoint|response|download|server|report))"
+      },
+      {
+        "id": "sleep",
+        "description": "Adds a fixed wait",
+        "pattern": "(?<!(not|n't|never|avoid|without|instead of|rather than|no need to) (\\w+ ){0,4})(waitForTimeout|\\bsleep\\b)"
+      },
+      {
+        "id": "more-time",
+        "description": "Raises timeouts",
+        "pattern": "(?<!(not|n't|never|avoid|without|instead of|rather than|no need to) (\\w+ ){0,4})(increase (the )?(\\w+ )?timeout|(longer|larger|higher|bigger) timeout)"
+      },
+      {
+        "id": "retries",
+        "description": "Hides the failure with retries",
+        "pattern": "(?<!(not|n't|never|avoid|without|instead of|rather than|no need to) (\\w+ ){0,4})((add|enable|increase|use|configure|set) (\\w+ ){0,2}retr(y|ies)|retries:\\s*[1-9]|toPass\\()"
+      },
+      {
+        "id": "skip",
+        "description": "Skips or silences the test",
+        "pattern": "(?<!(not|n't|never|avoid|without|instead of|rather than|no need to) (\\w+ ){0,4})(test\\.(skip|fixme)\\(|skip (the|this) test)"
+      },
+      {
+        "id": "change-locator",
+        "description": "Changes the correct link locator",
+        "pattern": "(?<!(not|n't|never|avoid|without|instead of|rather than|no need to) (\\w+ ){0,4})((change|update|fix|replace|adjust) (the )?(link )?(locator|selector)|use a different (locator|selector))"
+      },
+      {
+        "id": "download-permissions",
+        "description": "Changes browser download permissions or settings without evidence",
+        "pattern": "(?<!(not|n't|never|avoid|without|instead of|rather than|no need to) (\\w+ ){0,4})(acceptDownloads|(enable|allow|grant) downloads?|download (permissions?|settings?|behavior))"
+      }
+    ]
+  }
+}

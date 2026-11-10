@@ -1,0 +1,22 @@
+{
+  "id": "S13",
+  "spec": "tests/ui/reports.spec.ts",
+  "app": {
+    "profileApi": "ok",
+    "reportsApi": "unavailable"
+  },
+  "playwright": {
+    "retries": 0,
+    "testTimeoutMs": 15000
+  },
+  "expectObservation": {
+    "outcome": "unexpected",
+    "errorPattern": "Test timeout of 15000ms exceeded[\\s\\S]*page\\.waitForEvent: Test timeout of 15000ms exceeded[\\s\\S]*waiting for event \"download\"",
+    "attachments": [
+      "trace",
+      "screenshot",
+      "error-context"
+    ],
+    "errorContextPattern": "heading \"Service Unavailable\"[\\s\\S]*The report service is temporarily unavailable"
+  }
+}

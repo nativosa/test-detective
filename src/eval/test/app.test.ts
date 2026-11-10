@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { TestContext } from 'node:test';
-import { startApp, TEAM, unavailableUrl, USER } from '../../../evals/app/server.ts';
+import { MONTHLY_REPORT_CSV, startApp, TEAM, unavailableUrl, USER } from '../../../evals/app/server.ts';
 import type { AppConfig } from '../../../evals/app/server.ts';
 
 // The fixture app over real HTTP on 127.0.0.1. No browser and no external network.
@@ -112,6 +112,15 @@ describe('fixture app', () => {
     assert.doesNotMatch(settings, /setTimeout|setInterval|fetch\(/);
   });
 
+  test('reports page links to the monthly report download', async (t) => {
+    const { url } = await app(t, { profileApi: 'ok' });
+    const res = await fetch(`${url}/reports`);
+    assert.equal(res.status, 200);
+    const reports = await res.text();
+    assert.match(reports, /<h1>Reports<\/h1>/);
+    assert.match(reports, /<a href="\/reports\/monthly\.csv">Download monthly report<\/a>/);
+  });
+
   test('unknown paths are 404', async (t) => {
     const { url } = await app(t, { profileApi: 'ok' });
     assert.equal((await fetch(`${url}/nope`)).status, 404);
@@ -139,6 +148,32 @@ describe('fixture app fault modes (Stage 2.6)', () => {
     const page = Date.now();
     assert.equal((await fetch(`${url}/profile`)).status, 200);
     assert.ok(Date.now() - page < 250, 'other routes are not delayed');
+  });
+
+  test('without reportsApi, or with "ok", the monthly report is a CSV attachment', async (t) => {
+    for (const config of [{ profileApi: 'ok' }, { profileApi: 'error', reportsApi: 'ok' }] satisfies AppConfig[]) {
+      const { url } = await app(t, config);
+      const res = await fetch(`${url}/reports/monthly.csv`);
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('content-type'), 'text/csv; charset=utf-8');
+      assert.equal(res.headers.get('content-disposition'), 'attachment; filename="monthly-report.csv"');
+      assert.equal(await res.text(), MONTHLY_REPORT_CSV);
+    }
+    assert.equal(MONTHLY_REPORT_CSV, 'month,orders,revenue\n2026-10,42,1234.50\n');
+  });
+
+  test('"unavailable" answers the monthly report with a 503 error page and no attachment', async (t) => {
+    const { url } = await app(t, { profileApi: 'ok', reportsApi: 'unavailable' });
+    const res = await fetch(`${url}/reports/monthly.csv`);
+    assert.equal(res.status, 503);
+    assert.equal(res.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.equal(res.headers.get('content-disposition'), null);
+    const body = await res.text();
+    assert.match(body, /<h1>Service Unavailable<\/h1>/);
+    assert.match(body, /<p>The report service is temporarily unavailable\.<\/p>/);
+    assert.doesNotMatch(body, /month,orders/);
+    assert.equal((await fetch(`${url}/reports`)).status, 200, 'the reports page itself still loads');
+    assert.equal((await fetch(`${url}/api/profile`)).status, 200, 'the profile API is unaffected');
   });
 
   test('"hang" never answers the profile API, and close() still completes', async () => {

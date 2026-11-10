@@ -151,6 +151,15 @@ describe('auditWorkspace', () => {
     assert.ok(!problems.join('\n').includes(canary), 'canary values are never printed');
   });
 
+  test('the fixture mode names are eval-only strings', async (t) => {
+    assert.ok(markers.strings.includes('profileApi'));
+    assert.ok(markers.strings.includes('reportsApi'));
+    const { ws } = await workspace(t);
+    await writeFile(file(ws, 'artifacts/results.json'), '{"app": {"reportsApi": "unavailable"}}');
+    const { problems } = await auditWorkspace(ws, markers);
+    assert.ok(problems.some((p) => p.includes('"reportsApi"')));
+  });
+
   test('detects scenario-ID-like tokens in text files', async (t) => {
     const { ws } = await workspace(t);
     await writeFile(file(ws, SPEC), "test('S05 shows profile', async () => {});");

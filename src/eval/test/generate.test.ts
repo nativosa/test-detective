@@ -317,7 +317,7 @@ export default defineConfig({
   test('no stage config contains anything scenario-revealing', async () => {
     for (const id of await listScenarioIds()) {
       const source = stageConfigSource(await loadGenerationConfig(id));
-      assert.doesNotMatch(source, /profileApi|profileDelay|fail-first|hang|down|error|S\d{2}|TDCANARY|mock|control|post-run/i, `${id} config leaks scenario details`);
+      assert.doesNotMatch(source, /profileApi|profileDelay|reportsApi|unavailable|fail-first|hang|down|error|S\d{2}|TDCANARY|mock|control|post-run/i, `${id} config leaks scenario details`);
     }
   });
 
@@ -349,6 +349,31 @@ export default defineConfig({
     const { deps } = await setup(t, { during: probe }, (c) => (c.app.profileDelayMs = 300));
     await generateSnapshot('S02', deps);
     assert.ok(elapsed >= 250, `delay applied (${elapsed} ms)`);
+  });
+
+  test('reportsApi reaches the app the run uses; without it the report download is healthy', async (t) => {
+    const statusDuring = async (edit?: (c: Record<string, any>) => void) => {
+      let status = 0;
+      let disposition: string | null = null;
+      const probe = async (run: PlaywrightRun) => {
+        const res = await fetch(`${run.env.BASE_URL}/reports/monthly.csv`);
+        status = res.status;
+        disposition = res.headers.get('content-disposition');
+      };
+      const { deps } = await setup(t, { during: probe }, edit);
+      await generateSnapshot('S02', deps);
+      return { status, disposition };
+    };
+    assert.deepEqual(await statusDuring(), { status: 200, disposition: 'attachment; filename="monthly-report.csv"' });
+    assert.deepEqual(await statusDuring((c) => (c.app.reportsApi = 'ok')), { status: 200, disposition: 'attachment; filename="monthly-report.csv"' });
+    assert.deepEqual(await statusDuring((c) => (c.app.reportsApi = 'unavailable')), { status: 503, disposition: null });
+  });
+
+  test('reportsApi never appears in the stage config', async () => {
+    const config = await loadGenerationConfig('S02');
+    const source = stageConfigSource({ ...config, app: { ...config.app, reportsApi: 'unavailable' } });
+    assert.equal(source, stageConfigSource(config));
+    assert.doesNotMatch(source, /reportsApi|unavailable|reports/i);
   });
 });
 
@@ -492,5 +517,13 @@ describe('generation schema (Stage 2.6 fields)', () => {
     assert.equal(await parse((c) => (c.app.profileApi = 'flaky')), false);
     assert.equal(await parse((c) => (c.app.profileDelayMs = 60_000)), false);
     assert.equal(await parse((c) => (c.app.server = 'maybe')), false);
+    assert.equal(await parse((c) => (c.app.reportsApi = 'error')), false);
+    assert.equal(await parse((c) => (c.app.reportsApi = 503)), false);
+  });
+
+  test('reportsApi is optional and accepts ok and unavailable', async () => {
+    assert.equal(await parse(() => {}), true);
+    assert.equal(await parse((c) => (c.app.reportsApi = 'ok')), true);
+    assert.equal(await parse((c) => (c.app.reportsApi = 'unavailable')), true);
   });
 });

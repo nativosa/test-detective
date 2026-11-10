@@ -1,7 +1,7 @@
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import * as z from 'zod';
-import { MAX_PROFILE_DELAY_MS, PROFILE_API_MODES } from '../../evals/app/server.ts';
+import { MAX_PROFILE_DELAY_MS, PROFILE_API_MODES, REPORTS_API_MODES } from '../../evals/app/server.ts';
 import { GENERATION_FILE, loadScenarioFile, RegexSource, scenarioDir, ScenarioId, SCENARIOS_DIR } from './scenarios.ts';
 
 // Generator-side scenario data: how to produce a failure, nothing about how to diagnose it.
@@ -27,6 +27,7 @@ export const GenerationConfig = z
         profileApi: z.enum(PROFILE_API_MODES),
         profileDelayMs: z.number().int().min(1).max(MAX_PROFILE_DELAY_MS).optional().describe('Delay before a successful /api/profile response'),
         server: z.enum(['up', 'down']).optional().describe('down: BASE_URL points at a released local port, so connections are refused. Default up'),
+        reportsApi: z.enum(REPORTS_API_MODES).optional().describe('/reports/monthly.csv: ok (default) serves the CSV attachment, unavailable answers 503'),
       })
       .describe('Fixture app settings, passed by the generator, never written to the workspace'),
     playwright: z.strictObject({
