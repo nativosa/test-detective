@@ -1,0 +1,145 @@
+{
+  "id": "S11",
+  "canary": "TDCANARY-ab0b3926-d35f-482e-8147-d1db704b07d9",
+  "description": "Synthetic, deterministic. The /team page shows three member photos; each member's name and 'View <first name>'s profile' link sit in a figcaption that the page's CSS hides (display: none) until the figure is hovered, and the page tells the user to hover over a photo. The test asserts toBeVisible on getByText(\"View Ana's profile\") without hovering first, so the link exists (the locator resolves to it) but stays hidden. The app behaves as designed. A control that hovers over the 'Ana Lopez' photo first, then asserts and clicks, reaches /team/ana-lopez and passes against the same app. failureType incorrect_locator is the closest existing type: the locator is correct and resolves; the defect is the missing hover interaction before the conditionally visible link is used. The CSS rule is not inspectable through the investigator's tools; that hover reveals the link is an inference from the spec (no hover), the page's instruction text, and the hidden state of an element that exists. Neither get_trace_summary nor the screenshot is required.",
+  "failureType": "incorrect_locator",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [
+      {
+        "title": "opens a team member profile",
+        "file": "tests/ui/team.spec.ts"
+      }
+    ],
+    "classification": "Test-code defect",
+    "acceptableAlternatives": [],
+    "sourceMismatch": false,
+    "confidence": [
+      "High",
+      "Medium"
+    ]
+  },
+  "rootCause": {
+    "summary": "The profile link exists (the locator resolves to it) but is hidden until the member's photo is hovered; the test asserts its visibility and would click it without hovering first.",
+    "criteria": [
+      {
+        "id": "hidden",
+        "description": "Recognizes that the link is hidden, not visible",
+        "anyOf": [
+          "\\bhidden\\b",
+          "not (\\w+ )?visible",
+          "invisible",
+          "display:\\s*none"
+        ]
+      },
+      {
+        "id": "element-exists",
+        "description": "Recognizes that the link is present (the locator resolved to it), not missing",
+        "anyOf": [
+          "resolved",
+          "\\bexists?\\b",
+          "\\bpresent\\b",
+          "in the (DOM|page|markup|HTML)",
+          "(found|matched|located|finds|matches|locates) (the |an? )?(link|element|anchor)"
+        ]
+      },
+      {
+        "id": "hover",
+        "description": "Identifies hovering over the photo as what reveals the link, which the test never does",
+        "anyOf": [
+          "hover",
+          "mouse ?over",
+          "(pointer|mouse|cursor) (is |moves |rests )?(over|on)"
+        ]
+      }
+    ],
+    "forbiddenClaims": [
+      {
+        "id": "link-missing",
+        "description": "Claims the link is missing or not in the page",
+        "pattern": "(link|element|anchor)( is| was)? (missing|absent|removed)|(link|element|anchor) (does not|doesn't|did not|didn't) exist|no (such )?(profile )?link (exists|on the page)"
+      },
+      {
+        "id": "app-broken",
+        "description": "Claims the page, its CSS or the hover behavior is broken",
+        "pattern": "(team page|page|application|app|server|css|stylesheet|hover( effect)?) (is |was )?(broken|buggy|faulty)|hover (does not|doesn't|did not|didn't|fails to) (work|reveal|show)"
+      },
+      {
+        "id": "timing",
+        "description": "Blames timing or slowness",
+        "pattern": "race condition|too slow|loads? slowly|needs? more time|did not (load|render|appear) in time"
+      },
+      {
+        "id": "wrong-text",
+        "description": "Blames the locator's text or selector",
+        "pattern": "(locator|selector|link)( text)? (is )?(wrong|incorrect|misspelled)|wrong (link |locator )?text"
+      }
+    ]
+  },
+  "requiredEvidence": [
+    {
+      "kind": "mcp",
+      "refPattern": "get_failure_details",
+      "why": "Confirmed (Playwright 1.64.1): the error is toBeVisible on getByText(\"View Ana's profile\") with Expected: visible, Received: hidden, and the call log says the locator resolved to <a href=\"/team/ana-lopez\">, so the link exists but is hidden",
+      "provisional": false
+    },
+    {
+      "kind": "source",
+      "refPattern": "^tests/ui/team\\.spec\\.ts$",
+      "why": "The spec asserts and clicks the link with no hover before it",
+      "provisional": false
+    },
+    {
+      "kind": "error_context",
+      "refPattern": "^test-results/.+/error-context\\.md$",
+      "why": "Confirmed (Playwright 1.64.1): the page snapshot shows the instruction to hover over a member's photo and the three member images, and no link node (hidden elements are left out)",
+      "provisional": false
+    }
+  ],
+  "recommendations": {
+    "acceptable": [
+      {
+        "id": "hover-first",
+        "description": "Hover over the member's photo (or figure) before asserting on and clicking the link",
+        "anyOf": [
+          "\\.hover\\(",
+          "hover (over |on )?(the )?(\\w+ )?(photo|image|img|avatar|figure|card|picture)",
+          "(first|before) .{0,40}hover",
+          "hover .{0,40}(first|before)"
+        ]
+      }
+    ],
+    "forbidden": [
+      {
+        "id": "force",
+        "description": "Bypasses actionability checks",
+        "pattern": "force:\\s*true"
+      },
+      {
+        "id": "dispatch",
+        "description": "Dispatches a synthetic click on the hidden link",
+        "pattern": "dispatchEvent"
+      },
+      {
+        "id": "direct-navigation",
+        "description": "Skips the link and navigates to the profile URL directly",
+        "pattern": "goto\\(['\"`]/team/"
+      },
+      {
+        "id": "sleep",
+        "description": "Adds a fixed wait",
+        "pattern": "waitForTimeout|\\bsleep\\b"
+      },
+      {
+        "id": "more-time",
+        "description": "Raises timeouts",
+        "pattern": "increase (the )?(test |expect |action |navigation )?timeout"
+      },
+      {
+        "id": "change-app",
+        "description": "Changes the app or injects styles so the link is always visible",
+        "pattern": "addStyleTag|style\\.display|(remove|drop|change|edit) .{0,40}(css|style|display)|always (show|visible|displayed)"
+      }
+    ]
+  }
+}

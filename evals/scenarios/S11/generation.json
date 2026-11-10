@@ -1,0 +1,21 @@
+{
+  "id": "S11",
+  "spec": "tests/ui/team.spec.ts",
+  "app": {
+    "profileApi": "ok"
+  },
+  "playwright": {
+    "retries": 0,
+    "testTimeoutMs": 15000
+  },
+  "expectObservation": {
+    "outcome": "unexpected",
+    "errorPattern": "toBeVisible\\(\\) failed[\\s\\S]*Received: hidden[\\s\\S]*locator resolved to <a href=\"/team/ana-lopez\">",
+    "attachments": [
+      "trace",
+      "screenshot",
+      "error-context"
+    ],
+    "errorContextPattern": "paragraph: Hover over a team member's photo[\\s\\S]*img \"Ana Lopez\""
+  }
+}

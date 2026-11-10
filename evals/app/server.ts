@@ -11,6 +11,8 @@ import { parseArgs } from 'node:util';
 //   GET  /profile       page that loads /api/profile in the browser
 //   GET  /help          help page with a link that opens /help/guide in a new window
 //   GET  /help/guide    user guide page
+//   GET  /team          team page: each member's name and profile link are shown while their photo is hovered
+//   GET  /team/<slug>   member profile page (404 for unknown members)
 //   GET  /api/profile   by profileApi mode:
 //                         ok          200 JSON (after profileDelayMs, if set)
 //                         error       500
@@ -80,6 +82,11 @@ async function handle(config: AppConfig, state: AppState, req: http.IncomingMess
   if (route === 'GET /profile') return send(res, 200, 'text/html', PROFILE_PAGE);
   if (route === 'GET /help') return send(res, 200, 'text/html', HELP_PAGE);
   if (route === 'GET /help/guide') return send(res, 200, 'text/html', GUIDE_PAGE);
+  if (route === 'GET /team') return send(res, 200, 'text/html', TEAM_PAGE);
+  if (req.method === 'GET' && pathname.startsWith('/team/')) {
+    const member = TEAM.find((m) => `/team/${m.slug}` === pathname);
+    if (member) return send(res, 200, 'text/html', memberPage(member));
+  }
   if (route === 'GET /api/profile') {
     state.profileRequests += 1;
     const failed = config.profileApi === 'error' || (config.profileApi === 'fail-first' && state.profileRequests === 1);
@@ -177,6 +184,42 @@ const GUIDE_PAGE = layout(
   `<h1>User guide</h1>
 <p>Sign in with your username and password, then open Profile to see your details.</p>`,
 );
+
+export const TEAM = [
+  { slug: 'ana-lopez', name: 'Ana Lopez', first: 'Ana', role: 'Engineering lead' },
+  { slug: 'ben-carter', name: 'Ben Carter', first: 'Ben', role: 'Product designer' },
+  { slug: 'chen-wei', name: 'Chen Wei', first: 'Chen', role: 'Support specialist' },
+] as const;
+type Member = (typeof TEAM)[number];
+
+// Inline image, so the page makes no extra requests.
+const AVATAR = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Crect width='120' height='120' fill='%23c8d0dc'/%3E%3C/svg%3E`;
+
+const TEAM_PAGE = layout(
+  'Team',
+  `<style>
+  .team figure { display: inline-block; margin: 0 1rem 1rem 0; vertical-align: top; }
+  .team figcaption { display: none; }
+  .team figure:hover figcaption { display: block; }
+</style>
+<h1>Team</h1>
+<p>Hover over a team member's photo to see their name and profile link.</p>
+<div class="team">
+${TEAM.map(
+  (m) => `  <figure>
+    <img src="${AVATAR}" alt="${m.name}" width="120" height="120">
+    <figcaption>
+      <h2>${m.name}</h2>
+      <a href="/team/${m.slug}">View ${m.first}'s profile</a>
+    </figcaption>
+  </figure>`,
+).join('\n')}
+</div>`,
+);
+
+function memberPage(member: Member): string {
+  return layout(member.name, `<h1>${member.name}</h1>\n<p>${member.role}</p>\n<p><a href="/team">Back to the team</a></p>`);
+}
 
 // Manual use: node evals/app/server.ts [--profile-api ok|error|fail-first|hang] [--profile-delay-ms n] [--port n]
 if (import.meta.main) {

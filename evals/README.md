@@ -2,7 +2,7 @@
 
 Controlled Playwright failures with ground truth, used to measure how accurately, reliably and cheaply test-detective diagnoses failures. This stage evaluates the existing investigation (the `investigate-failure` Skill run by the Agent SDK CLI) as the baseline. It adds no investigation features.
 
-**Status: Stage 3.6 (retrospective).** Stage 2.5 built the schemas, the fixture app, three pilot scenarios (S02, S04, S05), snapshot generation and storage, investigation workspaces with isolation checks, offline scoring and reporting, the live adapter, and a one-run-per-scenario pilot benchmark. Stage 2.6.1 adds seven scenarios (S01, S03, S06–S10) aimed at timing, environment, flaky, inconclusive, source-mismatch and no-failure cases, plus the fixture modes, generation options, observation checks and control runs they need. Their snapshots are generated offline. Stage 2.6.2 added scorer version 6 for them (see "Scorer version 6" below). Four of them (S08, S07, S03, S09) were then run live once each; scorer version 7 followed from what those runs exposed (see "Scorer version 7"). Stage 3 added structured trace evidence (`get_trace_summary`), scorer version 8 and one more live run each of S07, S05 and S04 (see "Stage 3.5 live runs"). After Stage 3.6, S12 added a test that works with a second browser page (see "What the S12 artifacts contain"). It has a snapshot and a control but has not been run live.
+**Status: Stage 3.6 (retrospective).** Stage 2.5 built the schemas, the fixture app, three pilot scenarios (S02, S04, S05), snapshot generation and storage, investigation workspaces with isolation checks, offline scoring and reporting, the live adapter, and a one-run-per-scenario pilot benchmark. Stage 2.6.1 adds seven scenarios (S01, S03, S06–S10) aimed at timing, environment, flaky, inconclusive, source-mismatch and no-failure cases, plus the fixture modes, generation options, observation checks and control runs they need. Their snapshots are generated offline. Stage 2.6.2 added scorer version 6 for them (see "Scorer version 6" below). Four of them (S08, S07, S03, S09) were then run live once each; scorer version 7 followed from what those runs exposed (see "Scorer version 7"). Stage 3 added structured trace evidence (`get_trace_summary`), scorer version 8 and one more live run each of S07, S05 and S04 (see "Stage 3.5 live runs"). After Stage 3.6, S12 added a test that works with a second browser page (see "What the S12 artifacts contain"). It has a snapshot and a control, and one live run with the Stage 3.6 Skill (`live-S12-20261025T081519Z`: exact, accepted automatically under scorer v8). S11 then added a link that is hidden until its photo is hovered (see "What the S11 artifacts contain"). It has a snapshot and a control and has not been run live.
 
 ## Layout
 
@@ -35,7 +35,7 @@ src/eval/
 
 Scenario specs live outside the main config's `testDir` (`./tests`), so `npm test` never runs them. A test in `test:eval` checks this.
 
-The pilot scenarios are S02, S04 and S05; Stage 2.6 added S01, S03 and S06–S10; S12 followed Stage 3.6 (S11 and S13 are not assigned). The expected answers are only in each scenario's `truth.json` (and, as corrected tests, in `control/`). Don't repeat them in docs, specs, comments, file names or test titles.
+The pilot scenarios are S02, S04 and S05; Stage 2.6 added S01, S03 and S06–S10; S12 and S11 followed Stage 3.6 (S13 is not assigned). The expected answers are only in each scenario's `truth.json` (and, as corrected tests, in `control/`). Don't repeat them in docs, specs, comments, file names or test titles.
 
 ## Generation data vs ground truth
 
@@ -146,6 +146,25 @@ The spec clicks a `target="_blank"` link on `/help`, which opens `/help/guide` a
 
 **Failure type.** S12 uses `incorrect_locator`, the closest existing type. The selector itself is well-formed and matches the popup's heading; the defect is the `Page` object the locator is created on (the original page instead of the popup), not a malformed selector. The truth schema has no separate page-context type, and none was added.
 
+### What the S11 artifacts contain (Playwright 1.64.1, Chromium, three independent generations)
+
+`/team` shows three member photos and the text "Hover over a team member's photo to see their name and profile link." Each name and `View <first name>'s profile` link sits in a `figcaption` that the page's CSS hides until its figure is hovered. The spec asserts `toBeVisible` on `getByText("View Ana's profile")` without hovering. Two candidate generations (snapshots written to a disposable directory) and the stored one gave identical facts once report fingerprints, IDs, times and stage paths were normalized:
+
+| | S11 |
+|---|---|
+| Fixture | `ok` (the `/team` pages don't depend on the profile mode) |
+| Attempts | `failed` (10 s expect timeout), `tests/ui/team.spec.ts:7` |
+| Top error | `expect(locator).toBeVisible() failed`, `Expected: visible`, `Received: hidden`; call log `23 × locator resolved to <a href="/team/ana-lopez">View Ana's profile</a>`, `unexpected value "hidden"`. `get_failure_details` returns it in full (`error.actual: "hidden"`, not truncated, no `additionalErrors`) |
+| error-context page | heading `Team`, the hover instruction, three `figure`s each holding only an `img` (`Ana Lopez`, …). **No link node**: the page snapshot leaves out hidden elements. Each figure's accessible name still includes its hidden caption text (`figure "Ana Lopez View Ana's profile"`) |
+| Screenshot | the heading, the instruction and three plain photos; no names or links |
+| `get_trace_summary` retry 0 | `ok`, coverage complete; one request, document `GET /team` 200, `marker: none`; failure `Frame.expect`; no routes, page errors or console messages; no navigation to a profile |
+
+**Why `getByText` and an explicit `toBeVisible`.** A role locator excludes hidden elements (`tests/ui/hovers.spec.ts` notes the same), so `getByRole('link')` would fail as "element(s) not found", which looks just like a missing or misnamed element (S02, S12). A bare `click()` would end at the test timeout with the visibility log in a 500-character `additionalErrors` entry. With `getByText` and `toBeVisible`, the error shows in the 2000-character top error that the element exists and is hidden.
+
+**What the investigator can't see.** No tool returns CSS or DOM: the trace summary has network, route and timing facts only, and error-context is an accessibility snapshot. That the link is revealed **by hover** is therefore an inference from the spec (no hover), the page's instruction text and the hidden state of an element that exists. S11's required evidence is `get_failure_details`, the spec and `error-context.md`; the screenshot and `get_trace_summary` are optional, and nothing requires CSS or DOM details.
+
+**Failure type.** S11 uses `incorrect_locator`, the closest existing type, as S12 does. The locator is correct and resolves; the defect is the missing hover before using conditionally visible content. The truth schema has no interaction-step type, and none was added.
+
 ### Synthetic vs naturally occurring failures
 
 Every scenario failure is **synthetic and deterministic**: the fixture app or the generator injects it, and each generation reproduces it identically, which the observation checks enforce.
@@ -161,11 +180,11 @@ npm run eval -- control --scenario S03   # Playwright + local fixture app only; 
 
 A control is the scenario's test, corrected (`control/<spec>`). It runs in a fresh `.work/` stage with the scenario's own fixture behavior and Playwright settings, and must pass on the first attempt with exit code 0 and no global errors, without changing repo state. It writes nothing. A passing control shows the failure comes from what the correction changed, not from a broken fixture, which supports the ground truth independently of any model.
 
-Controls are answers, so they are evaluation-side data: the generator never reads `control/` (`separation.test.ts`), the stage that becomes a snapshot never contains it, and no snapshot or workspace ever does. S01, S03, S09 and S12 have controls (a dataset test requires them).
+Controls are answers, so they are evaluation-side data: the generator never reads `control/` (`separation.test.ts`), the stage that becomes a snapshot never contains it, and no snapshot or workspace ever does. S01, S03, S09, S11 and S12 have controls (a dataset test requires them).
 
 ## Fixture app
 
-`node evals/app/server.ts [--profile-api ok|error|fail-first|hang] [--profile-delay-ms n] [--port n]` starts it manually. The generator starts it in-process and passes the fault mode itself, so the mode never appears in a spec or in anything copied to an investigation workspace. `fail-first` counts per started server, so each generated run starts at the first request. `/help` (a page with a link that opens `/help/guide` in a new window) and `/help/guide` are served in every mode. `hang` never answers `/api/profile`; closing the server drops the connection.
+`node evals/app/server.ts [--profile-api ok|error|fail-first|hang] [--profile-delay-ms n] [--port n]` starts it manually. The generator starts it in-process and passes the fault mode itself, so the mode never appears in a spec or in anything copied to an investigation workspace. `fail-first` counts per started server, so each generated run starts at the first request. `/help` (a page with a link that opens `/help/guide` in a new window) and `/help/guide` are served in every mode, as are `/team` (three member photos; each name and profile link is shown only while its photo is hovered) and `/team/<slug>` for those members (404 otherwise). `hang` never answers `/api/profile`; closing the server drops the connection.
 
 ## Scoring is heuristic
 
@@ -296,7 +315,7 @@ A finished session must record `snapshot`, `workspace` and `configDifferences`.
 | `995a548c3447290899291ae14a3b0306d14ae85be4e0d2b974307fc7695d476d` | pilot S02, S04, S05; Stage 2.6 S08, S07 | — |
 | `ed2a523b32e9e652f54942a9b13db9d2c45bad39a1954c2a9ca13bb92e7863b9` | Stage 2.6 S03, S09 | Permission-safe trace inspection: trace commands run exactly as written, one per Bash call, with no compound syntax; one retry with a documented command after a denial; a missing trace is reported separately from one that is present but couldn't be inspected. Triggered by the S07 run, where one compound command was denied and never retried. |
 | `bb6a78c5e277cfe5fb34bc6990d7fc5d7d00f870c62aa6fff2fedaa1042580c4` | Stage 3.5 S07, S05, S04 | Stage 3.3: trace facts come from `get_trace_summary` (called for flaky attempts, network, navigation, loading/error/blank states and test-vs-application questions, per retry index), with status-specific handling (`ok`, `partial` = unlisted is unknown, `missing`, `unsupported`). Bash trace commands are a fallback for an unavailable, failed or unsupported summary. Classification no longer treats `_wasFulfilled` as test-created: route markers and status codes never decide alone; identifier-based fetch links, status changes, correlations, timing and coverage do. Analysis points are labelled observed, inference or uncertain. Scorer v8 (Stage 3.4) grades its trace evidence. |
-| `3a205d3b630b34cb79a89c15cce37a28d03d3a580706180352e77d2ed9ca9a17` | none yet | Stage 3.6: no Bash trace fallback (the `unzip`/`grep`/`head` permissions were removed); an unavailable, denied, failed or `unsupported` summary makes the trace present but not inspectable, with the reason and no **High** confidence when the classification depends on it, and the Skill never says an uninspected trace contains or lacks an event. Observed points hold only retrieved facts; causal conclusions go in Inference, unknowns in Uncertain. The only shell command left is `ls -l`. Scorer v8 still recognizes Bash trace reads in older transcripts. |
+| `3a205d3b630b34cb79a89c15cce37a28d03d3a580706180352e77d2ed9ca9a17` | S12 (`live-S12-20261025T081519Z`) | Stage 3.6: no Bash trace fallback (the `unzip`/`grep`/`head` permissions were removed); an unavailable, denied, failed or `unsupported` summary makes the trace present but not inspectable, with the reason and no **High** confidence when the classification depends on it, and the Skill never says an uninspected trace contains or lacks an event. Observed points hold only retrieved facts; causal conclusions go in Inference, unknowns in Uncertain. The only shell command left is `ls -l`. Scorer v8 still recognizes Bash trace reads in older transcripts. |
 
 ### Ground truth versions
 

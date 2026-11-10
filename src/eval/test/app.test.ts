@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { TestContext } from 'node:test';
-import { startApp, unavailableUrl, USER } from '../../../evals/app/server.ts';
+import { startApp, TEAM, unavailableUrl, USER } from '../../../evals/app/server.ts';
 import type { AppConfig } from '../../../evals/app/server.ts';
 
 // The fixture app over real HTTP on 127.0.0.1. No browser and no external network.
@@ -69,6 +69,32 @@ describe('fixture app', () => {
     const guide = await fetch(`${url}/help/guide`);
     assert.equal(guide.status, 200);
     assert.match(await guide.text(), /<h1>User guide<\/h1>/);
+  });
+
+  test('team page shows each member\'s details only while their photo is hovered', async (t) => {
+    const { url } = await app(t, { profileApi: 'ok' });
+    const team = await (await fetch(`${url}/team`)).text();
+    assert.match(team, /<h1>Team<\/h1>/);
+    assert.match(team, /<p>Hover over a team member's photo to see their name and profile link\.<\/p>/);
+    assert.match(team, /\.team figcaption \{ display: none; \}/);
+    assert.match(team, /\.team figure:hover figcaption \{ display: block; \}/);
+    for (const m of TEAM) {
+      assert.match(team, new RegExp(`<img src="data:image/svg\\+xml,[^"]+" alt="${m.name}" width="120" height="120">`));
+      assert.match(team, new RegExp(`<a href="/team/${m.slug}">View ${m.first}'s profile</a>`));
+    }
+    assert.equal(team.match(/<figure>/g)?.length, TEAM.length);
+  });
+
+  test('team member pages exist for each member; unknown members are 404', async (t) => {
+    const { url } = await app(t, { profileApi: 'ok' });
+    for (const m of TEAM) {
+      const res = await fetch(`${url}/team/${m.slug}`);
+      assert.equal(res.status, 200);
+      assert.match(await res.text(), new RegExp(`<h1>${m.name}</h1>`));
+    }
+    assert.equal((await fetch(`${url}/team/nobody`)).status, 404);
+    assert.equal((await fetch(`${url}/team/ana-lopez/extra`)).status, 404);
+    assert.equal((await fetch(`${url}/team/`)).status, 404);
   });
 
   test('unknown paths are 404', async (t) => {
