@@ -14,7 +14,7 @@ import type { FakeRunOptions } from './helpers.ts';
 // Control runs with a fake Playwright: no browser, no model. Real control specs are checked
 // against the real fixture with `npm run eval -- control --scenario <id>`.
 
-const SCENARIOS_WITH_CONTROLS = ['S01', 'S03', 'S09', 'S11', 'S12'];
+const SCENARIOS_WITH_CONTROLS = ['S01', 'S03', 'S09', 'S11', 'S12', 'S14'];
 
 async function setup(t: TestContext, id: string, options: FakeRunOptions = {}, edit?: (config: Record<string, any>) => void) {
   const base = await tempDir(t);

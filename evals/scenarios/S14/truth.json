@@ -1,0 +1,164 @@
+{
+  "id": "S14",
+  "canary": "TDCANARY-9d520658-8ad2-444a-8f49-9ce7881a87bd",
+  "description": "Synthetic, deterministic. The /settings page has an 'Email notifications' checkbox, a 'Reset preferences' button and a status region. Reset builds a new checkbox element (document.createElement) and replaces the original with it, then shows 'Preferences reset'; no timers or requests. The test takes an ElementHandle for the checkbox before the reset, waits for the status, then calls check() on that handle, which still points to the removed node: Playwright fails at once with 'elementHandle.check: Element is not attached to the DOM' (about 0.3 s, no timeout, no retry of the handle). The app behaves as designed. A control that keeps a Locator instead resolves the replacement checkbox and passes against the same app. failureType incorrect_locator is the closest existing type: the selector is correct and resolves to the replacement; the defect is holding a one-time element reference across a DOM replacement. That the node was replaced (rather than removed) is an inference from the detached error together with error-context, which shows a checkbox with the same name and the 'Preferences reset' status; no tool exposes DOM node identity. Neither get_trace_summary nor the screenshot is required.",
+  "failureType": "incorrect_locator",
+  "expected": {
+    "reportStatus": "investigated",
+    "tests": [
+      {
+        "title": "enables email notifications after resetting preferences",
+        "file": "tests/ui/settings.spec.ts"
+      }
+    ],
+    "classification": "Test-code defect",
+    "acceptableAlternatives": [],
+    "sourceMismatch": false,
+    "confidence": [
+      "High",
+      "Medium"
+    ]
+  },
+  "rootCause": {
+    "summary": "The test keeps an ElementHandle taken before the reset; the reset replaces the checkbox with a new node, so check() on the old handle fails because that node is no longer attached to the DOM.",
+    "criteria": [
+      {
+        "id": "detached",
+        "description": "Recognizes that the element the test acts on is detached or stale",
+        "anyOf": [
+          "not attached",
+          "\\bdetached\\b",
+          "\\bstale\\b",
+          "no longer (attached|in the (DOM|page|document)|connected|exists?|part of)",
+          "removed from the (DOM|page|document)",
+          "(the|a) removed (\\w+ )?(node|element|checkbox|input|one)\\b",
+          "disconnected",
+          "isConnected"
+        ]
+      },
+      {
+        "id": "replaced",
+        "description": "Recognizes that the reset replaced the checkbox with a new element",
+        "anyOf": [
+          "\\breplac(e|ed|es|ing|ement)\\b",
+          "re-?render",
+          "re-?creat",
+          "rebuil[dt]",
+          "swapp?(ed|s)?\\b",
+          "(new|fresh|another|different|second) (\\w+ )?(checkbox|input|element|node|instance|copy)"
+        ]
+      },
+      {
+        "id": "handle",
+        "description": "Identifies the ElementHandle (a reference taken before the reset) as what the test acts on",
+        "anyOf": [
+          "element ?handle",
+          "\\bhandle\\b",
+          "(stored|saved|captured|cached|retained|kept|held|old|original|earlier|previous) (\\w+ ){0,2}(reference|node|element)",
+          "reference to the (old|original|previous|removed|first)"
+        ]
+      }
+    ],
+    "forbiddenClaims": [
+      {
+        "id": "timing",
+        "description": "Blames timing, a race or a reset that had not finished",
+        "pattern": "(?<!(not|no|n't|isn't|wasn't) (a |an )?)(race condition|timing (issue|problem)|too (early|soon|fast)|needs? (more time|to wait longer)|(had|has)(n't| not) (yet )?(finished|completed)|before (the )?(reset|re-?render|page) (had |has )?(finished|completed|settled))"
+      },
+      {
+        "id": "checkbox-missing",
+        "description": "Claims the page has no checkbox (rather than a new one)",
+        "pattern": "(?<!(old|original|previous|first|initial|captured|stored|earlier) )checkbox( is| was)? (missing|absent|not (found|present|rendered|shown))|no checkbox (exists|is (present|rendered|shown)|on the page)|page (has|shows) no checkbox"
+      },
+      {
+        "id": "app-broken",
+        "description": "Claims the reset, the page or the app is broken",
+        "pattern": "(reset( button| handler)?|settings page|page|application|app) (is |was )?(broken|buggy|faulty|defective)|reset (button )?(does not|doesn't|did not|didn't|fails to) work|(?<!(not|no|n't|isn't|wasn't) (an? )?)(application|app|product) (bug|defect)"
+      },
+      {
+        "id": "disabled",
+        "description": "Claims the checkbox is disabled or not checkable",
+        "pattern": "(checkbox|input) (is |was )?(disabled|read-?only|not (enabled|editable|checkable))"
+      },
+      {
+        "id": "wrong-locator",
+        "description": "Blames the locator's role, name or selector",
+        "pattern": "(locator|selector)( text)? (is |was )?(wrong|incorrect|misspelled|ambiguous)|wrong (role|accessible name|label|selector)"
+      }
+    ]
+  },
+  "requiredEvidence": [
+    {
+      "kind": "mcp",
+      "refPattern": "get_failure_details",
+      "why": "Confirmed (Playwright 1.64.1): the error is 'elementHandle.check: Element is not attached to the DOM' at tests/ui/settings.spec.ts:10, with no expected/actual values and no timeout; the attempt lasts about 0.3 s",
+      "provisional": false
+    },
+    {
+      "kind": "source",
+      "refPattern": "^tests/ui/settings\\.spec\\.ts$",
+      "why": "The spec takes elementHandle() for the checkbox before clicking Reset preferences, waits for the status, then calls check() on that handle",
+      "provisional": false
+    },
+    {
+      "kind": "error_context",
+      "refPattern": "^test-results/.+/error-context\\.md$",
+      "why": "Confirmed (Playwright 1.64.1): the page snapshot at failure shows a checkbox \"Email notifications\" and the status \"Preferences reset\", so the reset completed and a checkbox with that name is on the page",
+      "provisional": false
+    }
+  ],
+  "recommendations": {
+    "acceptable": [
+      {
+        "id": "use-locator",
+        "description": "Keep a Locator for the checkbox instead of an ElementHandle, so it resolves the replacement",
+        "anyOf": [
+          "(use|keep|switch to|with|replace .{0,40} with|instead of .{0,40}(use|keep)) (a |the )?(playwright )?locator",
+          "locator (instead|rather)",
+          "(const|let) \\w+ = page\\.getByRole\\(['\"]checkbox"
+        ]
+      },
+      {
+        "id": "reacquire",
+        "description": "Get the element again after the reset",
+        "anyOf": [
+          "\\bre-?(acquire|query|fetch|obtain|resolve|locate|select|take|get)\\w*",
+          "(new|fresh) (element ?)?handle",
+          "(get|take|obtain|query|look up|find|locate) (the )?(\\w+ )?(checkbox|element|handle) (again|after)"
+        ]
+      }
+    ],
+    "forbidden": [
+      {
+        "id": "sleep",
+        "description": "Adds a fixed wait",
+        "pattern": "waitForTimeout|\\bsleep\\b|setTimeout"
+      },
+      {
+        "id": "more-time",
+        "description": "Raises timeouts",
+        "pattern": "increase (the )?(\\w+ )?timeout|(longer|larger|higher|bigger) timeout"
+      },
+      {
+        "id": "retries",
+        "description": "Relies on retries",
+        "pattern": "(add|enable|increase|use|configure|set) (\\w+ ){0,2}retr(y|ies)|retries:\\s*[1-9]|toPass\\("
+      },
+      {
+        "id": "force",
+        "description": "Bypasses actionability checks",
+        "pattern": "force:\\s*true"
+      },
+      {
+        "id": "set-via-script",
+        "description": "Sets the checked state with a script instead of checking the checkbox",
+        "pattern": "dispatchEvent|\\.checked\\s*=\\s*true"
+      },
+      {
+        "id": "change-app",
+        "description": "Changes the app so reset keeps the original node",
+        "pattern": "(keep|reuse|preserve) (the )?(same|original|existing) (checkbox|input|element|node)|(?<!(not|n't|no need to|without) )(change|modify|edit|fix) (the )?(reset|app|application|settings page)( handler| code| logic| behaviou?r)?\\b"
+      }
+    ]
+  }
+}

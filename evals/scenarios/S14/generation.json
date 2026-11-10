@@ -1,0 +1,22 @@
+{
+  "id": "S14",
+  "spec": "tests/ui/settings.spec.ts",
+  "app": {
+    "profileApi": "ok"
+  },
+  "playwright": {
+    "retries": 0,
+    "testTimeoutMs": 15000
+  },
+  "expectObservation": {
+    "outcome": "unexpected",
+    "errorPattern": "elementHandle\\.check: Element is not attached to the DOM",
+    "attachments": [
+      "trace",
+      "screenshot",
+      "error-context"
+    ],
+    "errorContextPattern": "checkbox \"Email notifications\"[\\s\\S]*status[^\\n]*: Preferences reset",
+    "maxFailedAttemptMs": 5000
+  }
+}

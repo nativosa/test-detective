@@ -13,6 +13,7 @@ import { parseArgs } from 'node:util';
 //   GET  /help/guide    user guide page
 //   GET  /team          team page: each member's name and profile link are shown while their photo is hovered
 //   GET  /team/<slug>   member profile page (404 for unknown members)
+//   GET  /settings      "Email notifications" checkbox; "Reset preferences" replaces it with a new, unchecked one
 //   GET  /api/profile   by profileApi mode:
 //                         ok          200 JSON (after profileDelayMs, if set)
 //                         error       500
@@ -87,6 +88,7 @@ async function handle(config: AppConfig, state: AppState, req: http.IncomingMess
     const member = TEAM.find((m) => `/team/${m.slug}` === pathname);
     if (member) return send(res, 200, 'text/html', memberPage(member));
   }
+  if (route === 'GET /settings') return send(res, 200, 'text/html', SETTINGS_PAGE);
   if (route === 'GET /api/profile') {
     state.profileRequests += 1;
     const failed = config.profileApi === 'error' || (config.profileApi === 'fail-first' && state.profileRequests === 1);
@@ -220,6 +222,24 @@ ${TEAM.map(
 function memberPage(member: Member): string {
   return layout(member.name, `<h1>${member.name}</h1>\n<p>${member.role}</p>\n<p><a href="/team">Back to the team</a></p>`);
 }
+
+// Reset builds a new checkbox element instead of re-inserting the old one.
+const SETTINGS_PAGE = layout(
+  'Settings',
+  `<h1>Settings</h1>
+<p id="email-setting"><input type="checkbox" id="email-notifications" checked> <label for="email-notifications">Email notifications</label></p>
+<p><button type="button" id="reset">Reset preferences</button></p>
+<p role="status" id="reset-status"></p>
+<script>
+  document.getElementById('reset').addEventListener('click', () => {
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.id = 'email-notifications';
+    document.getElementById('email-notifications').replaceWith(checkbox);
+    document.getElementById('reset-status').textContent = 'Preferences reset';
+  });
+</script>`,
+);
 
 // Manual use: node evals/app/server.ts [--profile-api ok|error|fail-first|hang] [--profile-delay-ms n] [--port n]
 if (import.meta.main) {

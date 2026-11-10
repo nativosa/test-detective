@@ -97,6 +97,21 @@ describe('fixture app', () => {
     assert.equal((await fetch(`${url}/team/`)).status, 404);
   });
 
+  test('settings page has the notifications checkbox, a reset button and a status region', async (t) => {
+    const { url } = await app(t, { profileApi: 'ok' });
+    const res = await fetch(`${url}/settings`);
+    assert.equal(res.status, 200);
+    const settings = await res.text();
+    assert.match(settings, /<h1>Settings<\/h1>/);
+    assert.match(settings, /<input type="checkbox" id="email-notifications" checked> <label for="email-notifications">Email notifications<\/label>/);
+    assert.match(settings, /<button type="button" id="reset">Reset preferences<\/button>/);
+    assert.match(settings, /<p role="status" id="reset-status"><\/p>/);
+    assert.match(settings, /const checkbox = document\.createElement\('input'\);/);
+    assert.match(settings, /getElementById\('email-notifications'\)\.replaceWith\(checkbox\);/);
+    assert.match(settings, /textContent = 'Preferences reset';/);
+    assert.doesNotMatch(settings, /setTimeout|setInterval|fetch\(/);
+  });
+
   test('unknown paths are 404', async (t) => {
     const { url } = await app(t, { profileApi: 'ok' });
     assert.equal((await fetch(`${url}/nope`)).status, 404);
