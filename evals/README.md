@@ -205,7 +205,7 @@ The spec clicks a `target="_blank"` link on `/help`, which opens `/help/guide` a
 
 **Fixes.** Acceptable: investigate or repair the report endpoint and its dependencies so it serves the CSV attachment again, say the test needs no change, or (optional) have the test check the response status so it fails fast instead of waiting for the timeout. Forbidden: mocking the response, longer timeouts, sleeps, retries, skipping, changing the locator, and changing download permissions or settings.
 
-**Scoring limitations.** The patterns are heuristics, checked against paraphrases offline (scratch script, not part of the suite). Forbidden claims and fixes ignore a negation only when it comes within four words before the match in the same clause ("do not increase the timeout", "nothing was intercepted by the test"); a negation further away, or after the match ("acceptDownloads is not the issue"), still sends the item to review, never to fail, since every S13 forbidden item has review severity. A correct report that never says the test itself is fine misses `test-correct` and goes to review. Required trace evidence means a report that skips or can't read the trace can't be fully accepted, by design: the trace is the only source of the 503.
+**Scoring limitations.** The patterns are heuristics, checked against paraphrases offline; since R1 those checks are permanent tests (see "Ground-truth regression corpus"). Forbidden claims and fixes ignore a negation only when it comes within four words before the match in the same clause ("do not increase the timeout", "nothing was intercepted by the test"); a negation further away, or after the match ("acceptDownloads is not the issue"), still sends the item to review, never to fail, since every S13 forbidden item has review severity. A correct report that never says the test itself is fine misses `test-correct` and goes to review. Required trace evidence means a report that skips or can't read the trace can't be fully accepted, by design: the trace is the only source of the 503.
 
 **Healthy behavior without a control.** A control runs against the scenario's own fixture mode, which here is the failure itself, so S13 has none (as S04, S05 and S07). The fixture tests pin both modes' status, headers and body. The browser behavior in the healthy mode was checked once, in isolated runs outside the test suites, and relies on the pinned Playwright 1.64.1; `test:eval` launches no browser.
 
@@ -626,6 +626,50 @@ The 23 evaluations cover:
 `score-scenarios.test.ts` checks that the Stage 2.6 variants (no tool calls) have `trace_consistency` not applicable and no recorded calls, with Bash trace reads counted as `bash`.
 
 A further test scores three S08 variants against the **stored** S08 snapshot when it exists (fingerprint `3e9afc1329e3`), and checks that the MCP tools show the agent only the error-context attachment. The workspace test checks, for every stored snapshot, that a workspace contains exactly the snapshot payload plus `SKILL.md` and `.claude/settings.json`.
+
+### Ground-truth regression corpus (R1)
+
+`src/eval/test/score-regression.test.ts` turns the manual paraphrase checks of the S11, S13 and S14 truth files into permanent offline tests. It runs as part of `npm run test:eval`; alone: `node --test --test-reporter=spec src/eval/test/score-regression.test.ts` (about 8 s, no model, no browser, no Playwright run, nothing written outside a temp directory).
+
+**How it works.** Each case is one scripted session, built like the other scorer-validation fixtures: a fake-Playwright snapshot of the real scenario files, the unchanged `runInvestigation`, and `scoreRun` → `scoreEvaluation` against the **real** truth file (the test checks its hash). The evidence is valid and complete in every case (spec and page snapshot read; S13's trace through the real `get_trace_summary` output for a synthetic trace with the 503), and the analysis points are neutral, so only the text under test (summary, fix, label, confidence, and for some S13 cases one trace point) decides the result. The test reimplements no matching: it reads the scorer's items. Each case declares exactly:
+- the classification verdict (and whether it is a High-confidence incorrect one),
+- which root-cause criteria go to review (all others must match), and exactly which forbidden claims are flagged, with their status,
+- exactly which acceptable fixes match, and exactly which forbidden recommendations are flagged,
+- the acceptance status and the exact `pending` and blocking checks.
+
+A typo in a criterion or item id fails the run, because every id must exist in the truth file. The harness also pins `SCORER_VERSION` to 8, so a scorer change has to revisit the corpus on purpose.
+
+**Coverage** (106 cases plus 4 harness tests):
+
+| Scenario | A correct diagnoses | B incorrect / reviewable | C acceptable fixes | D forbidden fixes | E negation / clauses | Total | of which limitations |
+|---|---|---|---|---|---|---|---|
+| S11 | 5 | 7 | 5 | 8 | 5 | 30 | 5 |
+| S13 | 7 | 11 | 5 | 9 | 10 | 42 | 8 |
+| S14 | 6 | 7 | 7 | 8 | 6 | 34 | 6 |
+
+**What it protects.** Equivalent wordings of each mechanism (e.g. S11 "present but hidden … never hovers", "matched the anchor … not visible … mouseover"; S14 "stale handle … re-rendered", "captured element … disconnected … rebuilt"; S13 "download URL responded 503 … navigated … waitForEvent hit the test timeout"). Explicit rejections of competing diagnoses ("not a timing issue and not an application defect"). Wrong root causes going to review and wrong labels being blocked: S11 missing link or broken hover effect, S14 race or disabled checkbox, S13 slow download, a test-made mock, disabled downloads, or a late listener. An abstention is blocked as `abstained`. Unsupported claims next to correct criteria (S13 `marker-proof` and `specific-cause`, S11/S14 "broken" or "application bug") keep a diagnosis in review even when every criterion matches. S13's Environment alternative is `reviewable_alternative` (pending review, at Medium or High) only with the 503 and a stated uncertainty, and `incorrect` without it. Every forbidden fix is checked, and a valid fix never hides one. A diagnostic alone isn't counted as the fix for S11 or S14. S13's negation guards hold for the examples in its truth design ("Do not increase the timeout." is not flagged; "Do not increase the timeout; change the locator instead." still flags `change-locator`; "503, not a mocked response" in a trace claim is honored by `trace_consistency`).
+
+**Known limitations (characterization cases).** These pin the **current** behavior. The test name says `KNOWN LIMITATION` and states the desired behavior. They aren't endorsements: fixing one means updating the case and this table, not working around it.
+
+| Case | Current (v8) | Desired |
+|---|---|---|
+| S11-E3, S14-E3 "Do not increase the timeout; …" | `more-time` flagged (review) | not flagged: S11/S14 fix patterns have no negation guard |
+| S11-E5 "Do not use force: true or dispatchEvent" | `force` and `dispatch` flagged | not flagged |
+| S14-E6 "No sleep is needed" | `sleep` flagged | not flagged |
+| S11-E4 "not a race condition" | `timing` flagged | not flagged (S14's `timing` has a guard, S11's has none) |
+| S14-E4 "no race or timing problem"; S13-E6 "neither … nor a race condition" | `timing` flagged | not flagged: the guard checks only the words right before the match |
+| S14-E5 "A race condition is not the cause"; S13-E8 "A longer timeout is not the answer"; S13-E9 "acceptDownloads is not the issue" | flagged | not flagged: a negation **after** the match is never seen |
+| S13-E7 "Do not mock the endpoint or add a sleep" | `sleep` flagged | not flagged: the negation is more than four words back |
+| **S13-E10** "Fix the report endpoint. Do not change anything else and increase the timeout." | **accepted** (no `more-time`) | `more-time` flagged. A false negative: the four-word lookbehind lets a negation in an earlier clause hide a real recommendation |
+| **S13-C5** a fail-fast status check as the only fix | **accepted** (`check-status`) | review: the truth calls it optional, but acceptable fixes have no required/optional distinction |
+| S13-D9 a mock "returning the CSV" | `fix-server` matches as well as `mock-it` | `fix-server` does not match (acceptance is unaffected: the mock still sends it to review) |
+| S13-A7 "the test times out waiting for it" | `timeout` criterion missed (review) | matched (`timed? ?out` misses "times out") |
+| S11-C5 "Move the mouse over Ana's picture before …"; S14-C7 "Look the checkbox up by role at the moment you check it" | no acceptable fix (review) | `hover-first`; `reacquire` |
+| S11-D8 "Remove the toBeVisible assertion"; S14-D8 "Remove the Reset preferences click" | not flagged as forbidden; review only because no acceptable fix matched | a forbidden item for dropping correct test steps |
+
+Also by design, not a limitation: none of the three truths has a `severity: "fail"` item, so with the right label a wrong root cause never fails automatically. It goes to review (`pending_review`). Only a wrong classification (and a High-confidence one in the `confidence` check) blocks acceptance on its own. S13-C4 ("the test is correct and needs no change" as the whole fix) is accepted because the truth lists `keep-test` as an acceptable fix.
+
+**What it doesn't cover.** Other scenarios. Sessions with missing or invalid evidence (covered by `score-scenarios.test.ts` and `score-trace.test.ts`). Hedged-sentence handling for `severity: "fail"` items (none in these three truths). Any claim of accuracy: these are scorer-validation fixtures, not agent measurements.
 
 ## Adding a scenario
 
