@@ -7,6 +7,8 @@ import type { ModelInvestigation, RunStatus } from '../agent/result.ts';
 import { FailureDetailsOutput, ListFailuresOutput } from '../mcp/report.ts';
 import { TraceSummaryOutput } from '../mcp/trace-summary.ts';
 import { auditTranscript, resolveFrom } from './isolation.ts';
+import { evaluatePolarity, POLARITY_LIMITS } from './polarity.ts';
+import type { PolarityMatch } from './polarity.ts';
 import type { Finding } from './isolation.ts';
 import type { RunOutcome } from './runs.ts';
 import { CONFIDENCE_LEVELS } from './truth.ts';
@@ -34,6 +36,9 @@ import type { LeakMarkers } from './workspace.ts';
 //   accepted or rejected automatically; only a human review of the classification check decides it.
 // - A forbidden claim with severity "fail" fails when stated plainly; in a hedged or negated
 //   sentence it goes to review, because a regex cannot tell "the server was down" from doubt.
+// - A review-severity forbidden match goes to review unless polarity.ts finds it clearly negated in
+//   its clause; positive, ambiguous and truncated analyses stay reviewable. A negated match leaves a
+//   pass item tagged forbidden_negated, which never changes a check's status.
 
 // 4: StructuredOutput calls of an outputFormat session are expected audit entries, not suspicious
 //    unexpected tools; workspace cleanup is recorded (infrastructure only).
@@ -56,7 +61,14 @@ import type { LeakMarkers } from './workspace.ts';
 //    absence) with the returned summaries: fail only for a clear contradiction, review when unclear.
 //    Per-test trace acquisition (MCP, Bash, not obtained), the model ID and the MCP server version are
 //    recorded. A session that never calls the tool scores exactly as under 7, plus that record.
-export const SCORER_VERSION = 8;
+// 9: review-severity forbidden claims and recommendations are matched per report field, on the whole
+//    field and from every clause start (so a truth lookbehind can't see a negator in an earlier
+//    clause), and each match gets a polarity (polarity.ts). Only matches that are all clearly negated
+//    avoid review; they leave a forbidden_negated audit item instead. v8's joined-text search still
+//    runs: a match there that no field accounts for (across fields) goes to review. A field over a
+//    polarity limit gives one forbidden-analysis review item per check (forbidden_incomplete).
+//    Severity "fail", criteria, acceptable fixes and evidence are unchanged.
+export const SCORER_VERSION = 9;
 
 export const CATEGORIES = [
   'scored',
@@ -660,8 +672,10 @@ function worst(statuses: CheckStatus[]): CheckStatus {
   for (const s of ORDER) if (statuses.includes(s)) return s;
   return 'not_applicable';
 }
+/** Audit-only items: recorded for the reader, never part of a check's status. */
+const AUDIT_TAGS = new Set(['forbidden_negated']);
 function fromItems(id: CheckId, items: Item[], pass: string): Check {
-  const status = worst(items.map((i) => i.status));
+  const status = worst(items.filter((i) => !AUDIT_TAGS.has(i.tag ?? '')).map((i) => i.status));
   const bad = items.filter((i) => i.status === status && status !== 'pass');
   return check(id, status, status === 'pass' || status === 'not_applicable' ? pass : bad.map((i) => `${i.id}: ${i.detail}`).join('; '), items);
 }
@@ -823,10 +837,19 @@ function rootCauseCheck({ truth }: Context, matched: Matched[]): Check {
             : { id: c.id, status: 'review', detail: `no pattern matched (${c.description})`, tag: 'criterion' },
       );
     }
+    const fields: Field[] = [
+      { label: 'failureSummary', text: m.analysis.failureSummary },
+      ...m.analysis.analysis.map((a, i) => ({ label: `analysis[${i}]`, text: a.point })),
+      { label: 'confidence.justification', text: m.analysis.confidence.justification },
+    ];
+    const truncations: Truncation[] = [];
     for (const f of forbiddenClaims) {
-      const item = forbiddenItem(f, parts, 'claim');
+      const { item, truncated } = forbiddenItem(f, fields, 'claim');
       if (item) items.push(item);
+      truncations.push(...truncated);
     }
+    const incomplete = incompleteItem(truncations, 'claim');
+    if (incomplete) items.push(incomplete);
   }
   return fromItems('root_cause', items, `all ${criteria.length} criteria matched, no forbidden claims (heuristic)`);
 }
@@ -853,10 +876,18 @@ function recommendationCheck({ truth }: Context, matched: Matched[]): Check {
       );
     }
     // A forbidden action is flagged wherever it is recommended, including the verification steps.
+    const fields: Field[] = [
+      { label: 'proposedFix', text: m.analysis.proposedFix },
+      ...m.analysis.verificationSteps.map((s, i) => ({ label: `verificationSteps[${i}]`, text: s })),
+    ];
+    const truncations: Truncation[] = [];
     for (const f of forbidden) {
-      const item = forbiddenItem(f, [m.analysis.proposedFix, ...m.analysis.verificationSteps], 'recommendation');
+      const { item, truncated } = forbiddenItem(f, fields, 'recommendation');
       if (item) items.push(item);
+      truncations.push(...truncated);
     }
+    const incomplete = incompleteItem(truncations, 'recommendation');
+    if (incomplete) items.push(incomplete);
   }
   return fromItems('recommendation', items, 'an acceptable fix, no forbidden recommendation (heuristic)');
 }
@@ -1575,16 +1606,147 @@ const NEGATED = /\b(no|not|never|nothing|neither|nor|none)\b|n't\b/i;
 
 type Forbidden = GroundTruth['rootCause']['forbiddenClaims'][number];
 
+const quote = (t: string, max = 160) => `"${t.length > max ? `${t.slice(0, max - 3)}...` : t}"`;
+
+/** How many matches a forbidden item's detail describes; the rest are only counted. */
+const DETAIL_MATCHES = 3;
+
+function describeMatch(m: PolarityMatch): string {
+  return `${quote(m.text, 80)} in ${quote(m.clause.excerpt)} (${m.polarity}: ${m.reason})`;
+}
+
+/** A report field searched for forbidden patterns; `label` names it in item details. */
+type Field = { label: string; text: string };
+
+/** Where a forbidden pattern's analysis was cut short (one entry per field and limit). */
+type Truncation = { label: string; limit: string; id: string };
+
 /**
- * A forbidden claim or recommendation. Severity "review" (the default) keeps the Stage 2.5 rule: any
- * match in the whole text goes to review. Severity "fail" is judged per sentence: a plain statement
- * fails; a match only in hedged or negated sentences goes to review.
+ * v8's joined text (exactly searchable(parts)), built from the per-field texts so that each
+ * character keeps the field it came from (`owner`, -1 for a whitespace run that joins two fields)
+ * and its offset in that field's text. Every field text is already searchable(), so collapsing the
+ * whitespace at the joins reproduces v8's string.
  */
-function forbiddenItem(f: Forbidden, parts: string[], kind: 'claim' | 'recommendation'): Item | null {
-  if ((f.severity ?? 'review') === 'review') {
-    if (!firstMatch([f.pattern], searchable(parts))) return null;
-    return { id: `forbidden:${f.id}`, status: 'review', detail: `suspicious ${kind} (${f.description}); may be a negation`, tag: 'forbidden' };
+function joinFields(texts: string[]): { text: string; owner: number[]; offset: number[] } {
+  let text = '';
+  const owner: number[] = [];
+  const offset: number[] = [];
+  let run: number | null = null;
+  const push = (ch: string, k: number, i: number) => {
+    if (/\s/.test(ch)) {
+      if (run !== null) {
+        if (run !== k) owner[owner.length - 1] = run = -1;
+        return;
+      }
+      run = k;
+      text += ' ';
+    } else {
+      run = null;
+      text += ch;
+    }
+    owner.push(k);
+    offset.push(i);
+  };
+  texts.forEach((t, k) => {
+    if (k > 0) push('\n', -1, -1);
+    for (let i = 0; i < t.length; i++) push(t[i]!, k, i);
+  });
+  return { text, owner, offset };
+}
+
+/**
+ * Matches of the v8 joined-text search that the per-field analysis doesn't account for: a match
+ * that starts at a join, or at a position where its field has no match (it reaches into, or depends
+ * on, another field). A joined match that starts where a per-field match starts is the same claim
+ * (a greedy pattern may only run on past the field's end), so it adds nothing.
+ */
+function crossFieldMatches(pattern: string, parts: string[], texts: string[], perField: PolarityMatch[][]): { unresolved: string[]; truncated: boolean } {
+  const { text, owner, offset } = joinFields(texts);
+  // Never expected; if the rebuilt string ever differs from v8's, no joined match counts as accounted for.
+  if (text !== searchable(parts)) owner.fill(-1);
+  const re = new RegExp(pattern, 'gi');
+  const unresolved: string[] = [];
+  let seen = 0;
+  for (const m of text.matchAll(re)) {
+    if (m[0] === '') continue;
+    if (++seen > POLARITY_LIMITS.maxMatches) return { unresolved, truncated: true };
+    const k = owner[m.index]!;
+    if (k >= 0 && perField[k]!.some((x) => x.start === offset[m.index])) continue;
+    unresolved.push(m[0]);
   }
+  return { unresolved, truncated: false };
+}
+
+/**
+ * A forbidden claim or recommendation. Severity "review" (the default): each report field is
+ * searched on its own (polarity.ts). Any positive or ambiguous match, or a match of v8's joined-text
+ * search that no field accounts for (across two fields), goes to review; matches that are all
+ * clearly negated leave only an audit item (forbidden_negated, status pass). A truncated analysis
+ * is returned in `truncated`; the caller turns all of a check's truncations into one review item.
+ * Severity "fail" is judged per sentence: a plain statement fails; a match only in hedged or negated
+ * sentences goes to review.
+ */
+function forbiddenItem(f: Forbidden, fields: Field[], kind: 'claim' | 'recommendation'): { item: Item | null; truncated: Truncation[] } {
+  const parts = fields.map((x) => x.text);
+  if ((f.severity ?? 'review') === 'review') {
+    const id = `forbidden:${f.id}`;
+    const texts = parts.map((p) => searchable([p]));
+    const truncated: Truncation[] = [];
+    const perField = texts.map((t, k) => {
+      const result = evaluatePolarity(f.pattern, t);
+      for (const limit of result.truncated) truncated.push({ label: fields[k]!.label, limit, id: f.id });
+      return result.matches;
+    });
+    const cross = crossFieldMatches(f.pattern, parts, texts, perField);
+    if (cross.truncated) truncated.push({ label: 'joined fields', limit: 'max_matches', id: f.id });
+    const matches = perField.flat();
+    const open = matches.filter((m) => m.polarity !== 'negated');
+    const more = (n: number) => (n > DETAIL_MATCHES ? `; ${n - DETAIL_MATCHES} more` : '');
+    const cut = truncated.length > 0 ? ' (analysis incomplete, see forbidden-analysis)' : '';
+    if (open.length > 0 || cross.unresolved.length > 0) {
+      const listed = [
+        ...open.map(describeMatch),
+        ...cross.unresolved.map((t) => `${quote(t, 120)} (matched only across report fields)`),
+      ];
+      return {
+        item: { id, status: 'review', detail: `suspicious ${kind} (${f.description}): ${listed.slice(0, DETAIL_MATCHES).join('; ')}${more(listed.length)}${cut}`, tag: 'forbidden' },
+        truncated,
+      };
+    }
+    if (matches.length === 0) return { item: null, truncated };
+    const listed = matches.slice(0, DETAIL_MATCHES).map(describeMatch).join('; ');
+    return {
+      item: { id, status: 'pass', detail: `negated ${kind} (${f.description}), not counted: ${listed}${more(matches.length)}${cut}`, tag: 'forbidden_negated' },
+      truncated,
+    };
+  }
+  return { item: severityFailItem(f, parts, kind), truncated: [] };
+}
+
+/** How many fields and items the forbidden-analysis detail names; the rest are only counted. */
+const DETAIL_LIST = 5;
+
+/**
+ * One review item for every forbidden-pattern analysis of a check that a limit cut short, so an
+ * oversized field can't be accepted, without one finding per forbidden pattern. Observed matches
+ * keep their own items.
+ */
+function incompleteItem(truncations: Truncation[], kind: 'claim' | 'recommendation'): Item | null {
+  if (truncations.length === 0) return null;
+  const list = (values: string[]) => {
+    const unique = [...new Set(values)];
+    return unique.slice(0, DETAIL_LIST).join(', ') + (unique.length > DETAIL_LIST ? ` and ${unique.length - DETAIL_LIST} more` : '');
+  };
+  const where = list(truncations.map((t) => `${t.label} (${t.limit})`));
+  return {
+    id: 'forbidden-analysis',
+    status: 'review',
+    detail: `forbidden ${kind} analysis incomplete in ${where}: a missing or negated match there is not trusted (${list(truncations.map((t) => t.id))})`,
+    tag: 'forbidden_incomplete',
+  };
+}
+
+function severityFailItem(f: Forbidden, parts: string[], kind: 'claim' | 'recommendation'): Item | null {
   const pattern = new RegExp(f.pattern, 'i');
   const sentences = parts.flatMap((p) => searchable([p]).split(/(?<=[.!?;:])\s+/)).filter((sentence) => pattern.test(sentence));
   if (sentences.length === 0) return null;
@@ -1593,7 +1755,6 @@ function forbiddenItem(f: Forbidden, parts: string[], kind: 'claim' | 'recommend
     const before = sentence.slice(0, m.index);
     return !NEGATED.test(before) && !HEDGE.test(`${before} ${sentence.slice(m.index + m[0].length)}`);
   });
-  const quote = (t: string) => `"${t.length > 160 ? `${t.slice(0, 157)}...` : t}"`;
   return plain
     ? { id: `forbidden:${f.id}`, status: 'fail', detail: `unsupported definitive ${kind} (${f.description}): ${quote(plain)}`, tag: 'forbidden_definitive' }
     : { id: `forbidden:${f.id}`, status: 'review', detail: `${kind} matches "${f.description}" only in a hedged or negated sentence: ${quote(sentences[0]!)}`, tag: 'forbidden' };

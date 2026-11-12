@@ -10,7 +10,8 @@ import { call, skillCall } from '../../agent/test/helpers.ts';
 import { loadReport } from '../../mcp/report.ts';
 import { getTraceSummary } from '../../mcp/trace-summary.ts';
 import { call as traceRecord, ORIGIN, pageTrace, resource, T0 } from '../../mcp/test/traces.ts';
-import { scoreRun } from '../runs.ts';
+import { POLARITY_LIMITS } from '../polarity.ts';
+import { reportRun, scoreRun } from '../runs.ts';
 import { SCENARIOS_DIR } from '../scenarios.ts';
 import { SCORER_VERSION } from '../score.ts';
 import type { AcceptanceStatus, CheckId, ClassificationVerdict, ScoreRecord } from '../score.ts';
@@ -29,19 +30,21 @@ import type { FakeRunOptions } from './helpers.ts';
 // complete in every case (spec and page snapshot read, S13's trace through the real
 // get_trace_summary output), so only the text under test decides the root-cause, recommendation and
 // classification checks. Each case states the exact criterion and forbidden-item results, the
-// classification verdict and the acceptance outcome it must get under scorer v8.
+// classification verdict and the acceptance outcome it must get under scorer RECORDED_UNDER.
 //
 // Cases marked `limitation` are CHARACTERIZATION tests: they pin today's behavior, which differs
 // from the behavior we would want (stated in `desired`). They are not endorsements: a change that
-// fixes one must update the case and the README table, not be blocked by it.
+// fixes one must update the case and the README table, not be blocked by it. Cases marked `fixedIn`
+// were limitations under an earlier scorer; `fixedIn.before` keeps the behavior pinned then.
 
-const RECORDED_UNDER = 8;
+const RECORDED_UNDER = 9;
 
 type Classification = ModelInvestigation['classification'];
 type Level = ModelInvestigation['confidence']['level'];
 type Ref = 'spec' | 'ctx' | 'details' | 'trace';
 type Point = [text: string, ref: Ref];
-type Flags = Record<string, 'review' | 'fail'>;
+/** 'negated': only a forbidden_negated audit item (status pass) was recorded, not a finding. */
+type Flags = Record<string, 'review' | 'fail' | 'negated'>;
 type Category = 'A' | 'B' | 'C' | 'D' | 'E';
 
 type Expect = {
@@ -56,6 +59,8 @@ type Expect = {
   fixes: string[];
   /** Exactly these forbidden recommendations are flagged. Default none. */
   bad?: Flags;
+  /** The checks that get the one forbidden-analysis review item (a field over a polarity limit). Default none. */
+  incomplete?: ('root_cause' | 'recommendation')[];
   acceptance: AcceptanceStatus;
   /** Exactly the checks left for review (acceptance.pending). Default none. */
   pending?: CheckId[];
@@ -73,9 +78,13 @@ type Case = {
   /** Replaces the scenario's neutral analysis points. */
   points?: Point[];
   fix?: string;
+  /** Replaces the default verification step (a plain re-run). */
+  steps?: string[];
   expect: Expect;
   /** Current behavior differs from what we want: the case pins the current behavior. */
   limitation?: { desired: string };
+  /** A former limitation, fixed in scorer `version`; `before` is the behavior pinned until then. */
+  fixedIn?: { version: number; before: string };
 };
 
 type Scenario = {
@@ -306,26 +315,56 @@ const S11: Scenario = {
     {
       id: 'S11-E3',
       category: 'E',
-      about: '"Do not increase the timeout." is flagged: S11 patterns have no negation guard',
+      about: '"Do not increase the timeout." is negated, not flagged (S11 patterns have no negation guard)',
       fix: 'Do not increase the timeout; hover over the photo first.',
-      expect: { verdict: 'exact', fixes: ['hover-first'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
-      limitation: { desired: 'the negated timeout is not flagged; accepted' },
+      expect: { verdict: 'exact', fixes: ['hover-first'], bad: { 'more-time': 'negated' }, acceptance: 'accepted' },
+      fixedIn: { version: 9, before: 'more-time review; pending_review (recommendation)' },
     },
     {
       id: 'S11-E4',
       category: 'E',
-      about: '"not a race condition" is flagged',
+      about: '"not a race condition" is negated, not flagged',
       summary: 'This is not a race condition: the link exists but is hidden until the photo is hovered.',
-      expect: { verdict: 'exact', claims: { timing: 'review' }, fixes: ['hover-first'], acceptance: 'pending_review', pending: ['root_cause'] },
-      limitation: { desired: 'the rejected timing explanation is not flagged; accepted' },
+      expect: { verdict: 'exact', claims: { timing: 'negated' }, fixes: ['hover-first'], acceptance: 'accepted' },
+      fixedIn: { version: 9, before: 'timing review; pending_review (root_cause)' },
     },
     {
       id: 'S11-E5',
       category: 'E',
-      about: 'negated force and dispatchEvent are both flagged',
+      about: 'negated force and dispatchEvent: the negation carries over "or" and past "force: true"',
       fix: 'Do not use force: true or dispatchEvent; hover over the photo first.',
-      expect: { verdict: 'exact', fixes: ['hover-first'], bad: { force: 'review', dispatch: 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
-      limitation: { desired: 'neither negated action is flagged; accepted' },
+      expect: { verdict: 'exact', fixes: ['hover-first'], bad: { force: 'negated', dispatch: 'negated' }, acceptance: 'accepted' },
+      fixedIn: { version: 9, before: 'force and dispatch review; pending_review (recommendation)' },
+    },
+    {
+      id: 'S11-E6',
+      category: 'E',
+      about: 'code punctuation inside a negated clause: "{ force: true }" and "dispatchEvent(\'click\')" stay negated',
+      fix: "Never pass { force: true } or call dispatchEvent('click'); hover over the photo first.",
+      expect: { verdict: 'exact', fixes: ['hover-first'], bad: { force: 'negated', dispatch: 'negated' }, acceptance: 'accepted' },
+    },
+    {
+      id: 'S11-E7',
+      category: 'E',
+      about: 'a positive recommendation after "and" is flagged although the field also has a negated one',
+      fix: 'Do not increase the timeout; hover over the photo first and pass { force: true } to the click.',
+      expect: { verdict: 'exact', fixes: ['hover-first'], bad: { 'more-time': 'negated', force: 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S11-E8',
+      category: 'E',
+      about: 'CROSS-FIELD: a forbidden fix split across two verification steps is flagged although the fix field holds only a negated match',
+      fix: 'Hover over the photo first; do not change the CSS.',
+      steps: ['Hover over the photo and confirm the link is visible; if it is not, remove', 'the display: none rule from the page and compare.'],
+      expect: { verdict: 'exact', fixes: ['hover-first'], bad: { 'change-app': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S11-E9',
+      category: 'E',
+      about: 'CROSS-FIELD: a negated match that the joined text only extends past the field end stays negated',
+      fix: 'Hover over the photo first; do not change the CSS.',
+      steps: ['Check the link display after hovering.'],
+      expect: { verdict: 'exact', fixes: ['hover-first'], bad: { 'change-app': 'negated' }, acceptance: 'accepted' },
     },
   ],
 };
@@ -647,42 +686,57 @@ const S13: Scenario = {
     {
       id: 'S13-E6',
       category: 'E',
-      about: '"neither ... nor" is not a recognized negation',
+      about: '"neither ... nor" negates both alternatives',
       summary: `${S13_SUMMARY} It is neither a slow server nor a race condition.`,
-      expect: { verdict: 'exact', claims: { timing: 'review' }, fixes: ['fix-server', 'keep-test'], acceptance: 'pending_review', pending: ['root_cause'] },
-      limitation: { desired: 'not flagged; accepted' },
+      expect: { verdict: 'exact', claims: { timing: 'negated' }, fixes: ['fix-server', 'keep-test'], acceptance: 'accepted' },
+      fixedIn: { version: 9, before: 'timing review; pending_review (root_cause)' },
     },
     {
       id: 'S13-E7',
       category: 'E',
       about: 'a negation more than four words before the match: "do not mock the endpoint or add a sleep"',
       fix: 'Do not mock the endpoint or add a sleep; fix the report service.',
-      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { sleep: 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
-      limitation: { desired: 'the sleep is not flagged; accepted' },
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { sleep: 'negated' }, acceptance: 'accepted' },
+      fixedIn: { version: 9, before: 'sleep review; pending_review (recommendation)' },
     },
     {
       id: 'S13-E8',
       category: 'E',
       about: 'a negation after the match: "a longer timeout is not the answer"',
       fix: 'A longer timeout is not the answer; fix the report endpoint.',
-      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
-      limitation: { desired: 'not flagged; accepted' },
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'more-time': 'negated' }, acceptance: 'accepted' },
+      fixedIn: { version: 9, before: 'more-time review; pending_review (recommendation)' },
     },
     {
       id: 'S13-E9',
       category: 'E',
       about: 'a negation after the match: "acceptDownloads is not the issue"',
       fix: 'Fix the report endpoint; acceptDownloads is not the issue.',
-      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'download-permissions': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
-      limitation: { desired: 'not flagged; accepted' },
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'download-permissions': 'negated' }, acceptance: 'accepted' },
+      fixedIn: { version: 9, before: 'download-permissions review; pending_review (recommendation)' },
     },
     {
       id: 'S13-E10',
       category: 'E',
-      about: 'FALSE NEGATIVE: a negation scoped to an earlier clause hides a real timeout recommendation',
+      about: 'a negation scoped to an earlier clause no longer hides a real timeout recommendation',
       fix: 'Fix the report endpoint. Do not change anything else and increase the timeout.',
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+      fixedIn: { version: 9, before: 'FALSE NEGATIVE: the S13 lookbehind saw "not" in the earlier clause, nothing was flagged, accepted' },
+    },
+    {
+      id: 'S13-E11',
+      category: 'E',
+      about: 'FALSE NEGATIVE: "Do not forget to increase the timeout." is suppressed by the S13 truth lookbehind',
+      fix: 'Fix the report endpoint. Do not forget to increase the timeout.',
       expect: { verdict: 'exact', fixes: ['fix-server'], acceptance: 'accepted' },
-      limitation: { desired: 'more-time is flagged (the timeout increase is recommended, not negated), so the diagnosis goes to review instead of being accepted' },
+      limitation: { desired: 'more-time is flagged ("do not forget to" recommends it); needs a truth guard change, the regex never matches' },
+    },
+    {
+      id: 'S13-E12',
+      category: 'E',
+      about: 'reported advice is ambiguous, so it stays reviewable although a later clause rejects it',
+      fix: 'Fix the report endpoint. Another report suggested to increase the timeout, but that would hide the defect.',
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
     },
   ],
 };
@@ -888,34 +942,104 @@ const S14: Scenario = {
     {
       id: 'S14-E3',
       category: 'E',
-      about: '"Do not increase the timeout." is flagged: S14 fix patterns have no negation guard',
+      about: '"Do not increase the timeout." is negated, not flagged (S14 fix patterns have no negation guard)',
       fix: 'Do not increase the timeout; use a locator instead.',
-      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
-      limitation: { desired: 'the negated timeout is not flagged; accepted' },
+      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { 'more-time': 'negated' }, acceptance: 'accepted' },
+      fixedIn: { version: 9, before: 'more-time review; pending_review (recommendation)' },
     },
     {
       id: 'S14-E4',
       category: 'E',
       about: 'a negation two words before the match: "no race or timing problem"',
       summary: 'There was no race or timing problem: the reset replaced the checkbox, and the old handle is detached.',
-      expect: { verdict: 'exact', claims: { timing: 'review' }, fixes: ['use-locator'], acceptance: 'pending_review', pending: ['root_cause'] },
-      limitation: { desired: 'not flagged; accepted' },
+      expect: { verdict: 'exact', claims: { timing: 'negated' }, fixes: ['use-locator'], acceptance: 'accepted' },
+      fixedIn: { version: 9, before: 'timing review; pending_review (root_cause)' },
     },
     {
       id: 'S14-E5',
       category: 'E',
       about: 'a negation after the match: "a race condition is not the cause"',
       summary: 'A race condition is not the cause: the reset replaced the checkbox and the old handle is detached.',
-      expect: { verdict: 'exact', claims: { timing: 'review' }, fixes: ['use-locator'], acceptance: 'pending_review', pending: ['root_cause'] },
-      limitation: { desired: 'not flagged; accepted' },
+      expect: { verdict: 'exact', claims: { timing: 'negated' }, fixes: ['use-locator'], acceptance: 'accepted' },
+      fixedIn: { version: 9, before: 'timing review; pending_review (root_cause)' },
     },
     {
       id: 'S14-E6',
       category: 'E',
-      about: '"No sleep is needed" is flagged',
+      about: '"No sleep is needed" is negated, not flagged',
       fix: 'No sleep is needed; re-query the checkbox after the reset.',
-      expect: { verdict: 'exact', fixes: ['reacquire'], bad: { sleep: 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
-      limitation: { desired: 'not flagged; accepted' },
+      expect: { verdict: 'exact', fixes: ['reacquire'], bad: { sleep: 'negated' }, acceptance: 'accepted' },
+      fixedIn: { version: 9, before: 'sleep review; pending_review (recommendation)' },
+    },
+    {
+      id: 'S14-E7',
+      category: 'E',
+      about: 'different polarity in one field: the negated sleep is not flagged, the timeout after ", but" is',
+      fix: 'Do not add a sleep, but increase the timeout; use a locator instead.',
+      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { sleep: 'negated', 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S14-E8',
+      category: 'E',
+      about: 'two matches of one claim: a negated one does not hide a positive one',
+      summary: 'A race condition is not the cause: the reset replaced the checkbox and the old handle is detached. It is also a timing problem in the reset.',
+      expect: { verdict: 'exact', claims: { timing: 'review' }, fixes: ['use-locator'], acceptance: 'pending_review', pending: ['root_cause'] },
+    },
+    {
+      id: 'S14-E9',
+      category: 'E',
+      about: 'a hedge is ambiguous, not a denial: "can\'t rule out a race condition" stays reviewable',
+      summary: "We can't rule out a race condition, but the reset replaced the checkbox and the old handle is detached.",
+      expect: { verdict: 'exact', claims: { timing: 'review' }, fixes: ['use-locator'], acceptance: 'pending_review', pending: ['root_cause'] },
+    },
+    {
+      id: 'S14-E10',
+      category: 'E',
+      about: 'code expressions inside a negated clause: waitForTimeout(500) and setTimeout(() => {}, 500)',
+      fix: 'Do not add page.waitForTimeout(500) or call setTimeout(() => {}, 500); use a locator instead.',
+      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { sleep: 'negated' }, acceptance: 'accepted' },
+    },
+    {
+      id: 'S14-E11',
+      category: 'E',
+      about: 'a positive code expression after "then" is flagged',
+      fix: 'Use a locator, then add page.waitForTimeout(500) before the click.',
+      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { sleep: 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S14-E12',
+      category: 'E',
+      about: 'TRUNCATED CANDIDATES: more matches than the limit go to review although every one seen is negated',
+      fix: `Use a locator instead. ${'Do not add a sleep. '.repeat(POLARITY_LIMITS.maxMatches + 5)}`,
+      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { sleep: 'negated' }, incomplete: ['recommendation'], acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S14-E13',
+      category: 'E',
+      about: 'TRUNCATED CLAUSES: a field with more clauses than the limit gets one review finding although its match is negated',
+      fix: `Do not add a sleep; ${'use a locator, '.repeat(POLARITY_LIMITS.maxClauses + 5)}done.`,
+      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { sleep: 'negated' }, incomplete: ['recommendation'], acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S14-E14',
+      category: 'E',
+      about: 'TRUNCATED CLAUSES, no forbidden match: still one review finding, not one per forbidden pattern',
+      fix: `${'use a locator, '.repeat(POLARITY_LIMITS.maxClauses + 5)}done.`,
+      expect: { verdict: 'exact', fixes: ['use-locator'], incomplete: ['recommendation'], acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S14-E15',
+      category: 'E',
+      about: 'TRUNCATED CLAUSES with a positive match: the match keeps its own finding next to the incomplete one',
+      fix: `Increase the timeout; ${'use a locator, '.repeat(POLARITY_LIMITS.maxClauses + 5)}done.`,
+      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { 'more-time': 'review' }, incomplete: ['recommendation'], acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S14-E16',
+      category: 'E',
+      about: 'TRUNCATED CLAUSES in the summary: root_cause gets the one review finding, the recommendation is unaffected',
+      summary: `A race condition is not the cause: the reset replaced the checkbox and the old handle is detached${', in short'.repeat(POLARITY_LIMITS.maxClauses + 5)}.`,
+      expect: { verdict: 'exact', claims: { timing: 'negated' }, fixes: ['use-locator'], incomplete: ['root_cause'], acceptance: 'pending_review', pending: ['root_cause'] },
     },
   ],
 };
@@ -936,7 +1060,7 @@ function investigationOf(s: Scenario, c: Case, f: Facts): ModelInvestigation {
     analysis: (c.points ?? s.neutral).map(([point, ref]) => ({ point, evidenceRefs: [refs[ref]] })),
     confidence: { level: c.confidence ?? s.confidence, justification: s.justification },
     proposedFix: c.fix ?? s.fix,
-    verificationSteps: [`npx playwright test ${f.spec}`],
+    verificationSteps: c.steps ?? [`npx playwright test ${f.spec}`],
   };
 }
 
@@ -987,7 +1111,13 @@ const recordOf = (c: Case): ScoreRecord => {
   return r;
 };
 const checkOf = (r: ScoreRecord, id: CheckId) => r.checks.find((x) => x.id === id)!;
-const flags = (r: ScoreRecord, id: CheckId): Record<string, string> => Object.fromEntries(checkOf(r, id).items.filter((i) => i.id.startsWith('forbidden:')).map((i) => [i.id.slice('forbidden:'.length), i.status]));
+const flags = (r: ScoreRecord, id: CheckId): Record<string, string> =>
+  Object.fromEntries(
+    checkOf(r, id)
+      .items.filter((i) => i.id.startsWith('forbidden:'))
+      // An audit item with any status other than pass shows up as `negated/<status>` and fails the case.
+      .map((i) => [i.id.slice('forbidden:'.length), i.tag !== 'forbidden_negated' ? i.status : i.status === 'pass' ? 'negated' : `negated/${i.status}`]),
+  );
 const explain = (r: ScoreRecord) =>
   `${r.category}/${r.acceptance.status} [${r.classification.tests[0]?.verdict}] blockers: ${r.acceptance.blockers.join('; ') || '-'} | pending: ${r.acceptance.pending.join(', ') || '-'} | ` +
   ['root_cause', 'recommendation'].map((id) => `${id}: ${checkOf(r, id as CheckId).items.map((i) => `${i.id}=${i.status}`).join(', ')}`).join(' | ');
@@ -1040,6 +1170,83 @@ describe('R1 regression corpus: harness', () => {
     }
   });
 
+  test('the fixed and remaining limitations are the reviewed ones', () => {
+    const all = SCENARIOS.flatMap((s) => s.cases);
+    assert.deepEqual(all.filter((c) => c.fixedIn).map((c) => c.id), [
+      'S11-E3', 'S11-E4', 'S11-E5', 'S13-E6', 'S13-E7', 'S13-E8', 'S13-E9', 'S13-E10', 'S14-E3', 'S14-E4', 'S14-E5', 'S14-E6',
+    ]);
+    assert.deepEqual(all.filter((c) => c.limitation).map((c) => c.id), ['S11-C5', 'S11-D8', 'S13-A7', 'S13-C5', 'S13-D9', 'S13-E11', 'S14-C7', 'S14-D8']);
+    assert.ok(all.every((c) => !(c.fixedIn && c.limitation)));
+  });
+
+  test('negated-match audit items pass, never decide a check, and stay bounded', () => {
+    let audit = 0;
+    for (const s of SCENARIOS) {
+      for (const c of s.cases) {
+        for (const id of ['root_cause', 'recommendation'] as const) {
+          const chk = checkOf(recordOf(c), id);
+          for (const i of chk.items.filter((x) => x.id.startsWith('forbidden:'))) {
+            assert.ok(i.detail.length <= 1200, `${c.id} ${i.id}: detail of ${i.detail.length} characters`);
+            if (i.tag !== 'forbidden_negated') continue;
+            audit++;
+            assert.equal(i.status, 'pass', `${c.id} ${i.id}`);
+            assert.match(i.detail, /^negated (claim|recommendation) .*\(negated: (negator_before|negated_predicate_after)\)/, `${c.id} ${i.id}`);
+          }
+          // The check's status is the worst of its other items: an audit item never raises or lowers it.
+          const others = chk.items.filter((x) => x.tag !== 'forbidden_negated').map((x) => x.status);
+          const expected = (['fail', 'review', 'partial', 'pass'] as const).find((st) => others.includes(st)) ?? 'not_applicable';
+          assert.equal(chk.status, expected, `${c.id} ${id}`);
+        }
+      }
+    }
+    assert.ok(audit >= 12, `only ${audit} audit items`);
+  });
+
+  test('a truncated analysis is one bounded, identifiable review item per check', () => {
+    const caseOf = (id: string) => SCENARIOS.flatMap((s) => s.cases).find((x) => x.id === id)!;
+    const detail = (caseId: string, check: CheckId, itemId: string) => checkOf(recordOf(caseOf(caseId)), check).items.find((i) => i.id === itemId)!.detail;
+    const S14_RECS = 'sleep, more-time, retries, force, set-via-script and 1 more';
+    assert.equal(detail('S14-E12', 'recommendation', 'forbidden-analysis'), 'forbidden recommendation analysis incomplete in proposedFix (max_matches), joined fields (max_matches): a missing or negated match there is not trusted (sleep)');
+    assert.equal(detail('S14-E13', 'recommendation', 'forbidden-analysis'), `forbidden recommendation analysis incomplete in proposedFix (max_clauses): a missing or negated match there is not trusted (${S14_RECS})`);
+    assert.equal(detail('S14-E14', 'recommendation', 'forbidden-analysis'), detail('S14-E13', 'recommendation', 'forbidden-analysis'));
+    assert.match(detail('S14-E16', 'root_cause', 'forbidden-analysis'), /^forbidden claim analysis incomplete in failureSummary \(max_clauses\)/);
+    // The observed match keeps its own item, which points to the incomplete one.
+    assert.match(detail('S14-E13', 'recommendation', 'forbidden:sleep'), /^negated recommendation .* \(analysis incomplete, see forbidden-analysis\)$/);
+    assert.match(detail('S14-E15', 'recommendation', 'forbidden:more-time'), /^suspicious recommendation .*"Increase the timeout".* \(analysis incomplete, see forbidden-analysis\)$/);
+    // Not counted as a suspicious recommendation (forbiddenHits counts tag "forbidden" only).
+    assert.ok(checkOf(recordOf(caseOf('S14-E14')), 'recommendation').items.every((i) => i.tag !== 'forbidden'));
+  });
+
+  test('the cross-field cases really match only across the joined fields, as v8 searched them', async () => {
+    const truth = truths.get('S11')!;
+    const pattern = new RegExp(truth.recommendations.forbidden.find((f) => f.id === 'change-app')!.pattern, 'gi');
+    const fieldsOf = (id: string) => {
+      const c = S11.cases.find((x) => x.id === id)!;
+      return [c.fix!, ...c.steps!];
+    };
+    // S11-E8: no single field contains the match that starts at "remove"; the joined text does.
+    const e8 = fieldsOf('S11-E8');
+    assert.deepEqual(e8.slice(1).map((t) => [...t.matchAll(pattern)].length), [0, 0]);
+    assert.deepEqual([...e8.join(' ').matchAll(pattern)].map((m) => m[0]), ['change the CSS', 'remove the display']);
+    // S11-E9: the joined match starts where the fix field's own (negated) match starts and runs on into the step.
+    const e9 = fieldsOf('S11-E9');
+    assert.deepEqual([...e9[0]!.matchAll(pattern)].map((m) => m[0]), ['change the CSS']);
+    assert.deepEqual([...e9.join(' ').matchAll(pattern)].map((m) => [m[0], m.index]), [['change the CSS. Check the link display', e9[0]!.indexOf('change')]]);
+  });
+
+  test('the report counts review findings only, never negated-match audit items', async () => {
+    const { summary } = await reportRun(runDir);
+    const eligible = [...records.values()].filter((r) => r.category === 'scored' || r.category === 'needs_review');
+    assert.equal(eligible.length, records.size);
+    const count = (id: CheckId, tag: string) => eligible.flatMap((r) => checkOf(r, id).items).filter((i) => i.tag === tag).length;
+    assert.equal(summary.automatic.rootCause.forbiddenHits, count('root_cause', 'forbidden'));
+    assert.equal(summary.automatic.recommendation.forbiddenHits, count('recommendation', 'forbidden'));
+    assert.ok(count('root_cause', 'forbidden_negated') > 0 && count('recommendation', 'forbidden_negated') > 0);
+    // Acceptance totals follow the records, which the per-case tests pin.
+    assert.equal(summary.automatic.acceptance.accepted.count, eligible.filter((r) => r.acceptance.status === 'accepted').length);
+    assert.deepEqual(summary.scorerVersions, [SCORER_VERSION]);
+  });
+
   test('every scenario covers categories A–E, and every named id exists in its truth', () => {
     for (const s of SCENARIOS) {
       assert.deepEqual([...new Set(s.cases.map((c) => c.category))].sort(), ['A', 'B', 'C', 'D', 'E'], s.id);
@@ -1052,7 +1259,10 @@ describe('R1 regression corpus: harness', () => {
 for (const s of SCENARIOS) {
   describe(`R1 regression corpus: ${s.id}`, () => {
     for (const c of s.cases) {
-      const label = `${c.id} [${c.category}] ${c.about}${c.limitation ? ` — KNOWN LIMITATION (current behavior pinned; desired: ${c.limitation.desired})` : ''}`;
+      const label =
+        `${c.id} [${c.category}] ${c.about}` +
+        (c.limitation ? ` — KNOWN LIMITATION (current behavior pinned; desired: ${c.limitation.desired})` : '') +
+        (c.fixedIn ? ` — FIXED IN v${c.fixedIn.version} (before: ${c.fixedIn.before})` : '');
       test(label, () => {
         const r = recordOf(c);
         const why = explain(r);
@@ -1080,6 +1290,15 @@ for (const s of SCENARIOS) {
           assert.deepEqual(acceptable.detail.replace(/^matched /, '').split(', ').sort(), [...c.expect.fixes].sort(), `acceptable: ${why}`);
         }
         assert.deepEqual(flags(r, 'recommendation'), c.expect.bad ?? {}, `forbidden recommendations: ${why}`);
+        // A truncated analysis: exactly one review item per affected check, none elsewhere.
+        for (const id of ['root_cause', 'recommendation'] as const) {
+          const incomplete = checkOf(r, id).items.filter((i) => i.tag === 'forbidden_incomplete');
+          assert.deepEqual(
+            incomplete.map((i) => `${i.id}=${i.status}`),
+            (c.expect.incomplete ?? []).includes(id) ? ['forbidden-analysis=review'] : [],
+            `${id} incomplete: ${why}`,
+          );
+        }
 
         // Overall acceptance: status, and exactly which checks are pending or blocking.
         assert.equal(r.acceptance.status, c.expect.acceptance, why);

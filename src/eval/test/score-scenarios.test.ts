@@ -200,9 +200,9 @@ describe('scorer v7: verification steps and denied access', () => {
   });
 
   test('forbidden recommendations are found in verificationSteps and are not hidden by a valid re-run', () => {
-    assert.ok(items('s03SleepInSteps', 'recommendation').some((i) => i.id === 'forbidden:sleep'));
+    assert.ok(items('s03SleepInSteps', 'recommendation').some((i) => i.id === 'forbidden:sleep' && i.status === 'review'));
     const r = items('s09RerunHidesSleep', 'recommendation');
-    assert.ok(r.some((i) => i.id === 'forbidden:sleep') && r.some((i) => i.id === 'acceptable' && i.status === 'pass'));
+    assert.ok(r.some((i) => i.id === 'forbidden:sleep' && i.status === 'review') && r.some((i) => i.id === 'acceptable' && i.status === 'pass'));
   });
 
   test('S07 shape: honest "not available" passes, the citation goes to review, required evidence still fails', () => {
