@@ -14,7 +14,8 @@ import { loadScenarioFile, RegexSource, ScenarioId, SCENARIOS_DIR, TRUTH_FILE } 
 // Fields added in Stage 2.6 (tests[].reportedOutcome, unavailableEvidence, reviewableAlternatives,
 // severity) are optional; leaving them out keeps the Stage 2.5 meaning. So is Stage 3.4's
 // requiredEvidence[].observations: without it, a trace obtained through get_trace_summary needs only
-// to be read in full (status ok).
+// to be read in full (status ok). And R3b's recommendations.acceptable[].role: without it, every
+// acceptable fix is corrective, as before.
 
 const Investigation = ModelReport.shape.investigations.element;
 /** The CLI's own evidence kinds and confidence levels, so truth files can't drift from them. */
@@ -38,6 +39,17 @@ const Criterion = z.strictObject({
   id: z.string().regex(/^[a-z0-9-]+$/),
   description: z.string().min(1),
   anyOf: z.array(RegexSource).min(1).describe('The criterion is met if any pattern matches (case-insensitive)'),
+});
+
+export const RECOMMENDATION_ROLES = ['corrective', 'supporting'] as const;
+
+const AcceptableFix = Criterion.extend({
+  role: z
+    .enum(RECOMMENDATION_ROLES)
+    .optional()
+    .describe(
+      'corrective (default): addresses the diagnosed defect, or the investigation that resolves an uncertain diagnosis; one match satisfies the recommendation. supporting: a useful addition (e.g. a fail-fast diagnostic) that never satisfies it on its own (scorer v10)',
+    ),
 });
 
 const Forbidden = z.strictObject({
@@ -118,7 +130,10 @@ export const GroundTruth = z
       }),
     ),
     recommendations: z.strictObject({
-      acceptable: z.array(Criterion).refine(uniqueIds, 'recommendation ids must be unique'),
+      acceptable: z
+        .array(AcceptableFix)
+        .refine(uniqueIds, 'recommendation ids must be unique')
+        .refine((fixes) => fixes.length === 0 || fixes.some((f) => f.role !== 'supporting'), 'acceptable fixes need at least one corrective entry; supporting ones never satisfy the recommendation alone'),
       forbidden: z.array(Forbidden).refine(uniqueIds, 'forbidden recommendation ids must be unique'),
     }),
   })

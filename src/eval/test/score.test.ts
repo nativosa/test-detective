@@ -7,6 +7,7 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { ModelInvestigation } from '../../agent/result.ts';
 import { report, success, toolResult, toolUse } from '../../agent/test/helpers.ts';
 import { leakMarkers } from '../isolation.ts';
+import { aggregate } from '../report.ts';
 import { OUTCOME_FILE, RESULT_FILE, RunOutcome, SCORE_FILE, SCORE_HISTORY_DIR, ScoreConflictError, scoreRun, snapshotInfo, TRANSCRIPT_FILE } from '../runs.ts';
 import { SCENARIOS_DIR } from '../scenarios.ts';
 import { CHECK_IDS, SCORER_VERSION, ScoreRecord, scoreEvaluation } from '../score.ts';
@@ -258,6 +259,174 @@ describe('root cause and recommendation heuristics', () => {
     const items = checkOf(score('incorrectRecommendation'), 'recommendation').items;
     assert.ok(items.some((i) => i.id === 'acceptable' && i.status === 'pass'));
     assert.ok(items.some((i) => i.id === 'forbidden:sleep' && i.status === 'review'));
+  });
+});
+
+describe('recommendation roles (scorer v10, synthetic truth)', () => {
+  // S02's real truth plus a corrective alternative and two supporting fixes; the second supporting
+  // one is verification-only (its pattern describes a re-run), so it may match in verificationSteps.
+  const roles = (t: GroundTruth) =>
+    (t.recommendations.acceptable = [
+      { id: 'use-log-in', description: "Locate the button by its real name 'Log in'", anyOf: ["name: ?['\"]log in['\"]"] },
+      { id: 'use-test-id', description: 'A corrective alternative', anyOf: ['getByTestId'] },
+      { id: 'list-buttons', role: 'supporting', description: 'Log the button names first', anyOf: ['log (the )?button names'] },
+      { id: 'rerun', role: 'supporting', description: 'Re-run the test', anyOf: ['re-?run'] },
+    ]);
+  const scoreWith = async (fix: string, steps?: string[], truth: (t: GroundTruth) => void = roles) =>
+    scoreEvaluation(
+      withTruth(
+        mutateAnalysis(await inputFor('correct'), (a) => {
+          a.proposedFix = fix;
+          if (steps) a.verificationSteps = steps;
+        }),
+        truth,
+      ),
+    );
+  const acceptableOf = (r: ScoreRecord) => checkOf(r, 'recommendation').items.find((i) => i.id === 'acceptable');
+  const CORRECT = "Locate the button by its real name: page.getByRole('button', { name: 'Log in' }).";
+  const NO_CORRECTIVE = 'no corrective fix matched (use-log-in, use-test-id)';
+
+  test('one corrective match passes, as before', async () => {
+    const r = await scoreWith(CORRECT);
+    assert.deepEqual(acceptableOf(r), { id: 'acceptable', status: 'pass', detail: 'matched use-log-in', tag: 'acceptable' });
+    assert.equal(status(r, 'recommendation'), 'pass');
+    assert.equal(r.acceptance.status, 'accepted');
+  });
+
+  test('of two corrective alternatives, either one alone is sufficient', async () => {
+    const r = await scoreWith("Locate the button with page.getByTestId('login').");
+    assert.equal(acceptableOf(r)!.status, 'pass');
+    assert.equal(acceptableOf(r)!.detail, 'matched use-test-id');
+    assert.equal(r.acceptance.status, 'accepted');
+  });
+
+  test('corrective plus supporting passes and records both, the supporting one labelled', async () => {
+    const r = await scoreWith(`First log the button names. ${CORRECT}`);
+    assert.equal(acceptableOf(r)!.status, 'pass');
+    assert.equal(acceptableOf(r)!.detail, 'matched use-log-in, list-buttons (supporting)');
+    assert.equal(r.acceptance.status, 'accepted');
+  });
+
+  test('supporting only goes to review, with an explanation that says so', async () => {
+    const r = await scoreWith('Log the button names before clicking.');
+    assert.deepEqual(acceptableOf(r), { id: 'acceptable', status: 'review', detail: `only a supporting recommendation matched (list-buttons); ${NO_CORRECTIVE}`, tag: 'acceptable' });
+    assert.equal(status(r, 'recommendation'), 'review');
+    assert.deepEqual(r.acceptance, { status: 'pending_review', blockers: [], pending: ['recommendation'] });
+  });
+
+  test('a supporting fix that matches only in verificationSteps never satisfies the check', async () => {
+    const r = await scoreWith('Look at the page first.', ['Rerun the test.']);
+    assert.equal(acceptableOf(r)!.status, 'review');
+    assert.equal(acceptableOf(r)!.detail, `only a supporting recommendation matched (rerun (in verificationSteps)); ${NO_CORRECTIVE}`);
+    // The same verification-only criterion without a role keeps its v7 meaning: met from the steps.
+    const corrective = await scoreWith('Look at the page first.', ['Rerun the test.'], (t) => {
+      roles(t);
+      delete t.recommendations.acceptable[3]!.role;
+    });
+    assert.equal(acceptableOf(corrective)!.status, 'pass');
+    assert.equal(acceptableOf(corrective)!.detail, 'matched rerun (in verificationSteps)');
+  });
+
+  test('a corrective fix never hides forbidden advice', async () => {
+    const r = await scoreWith(`${CORRECT} Add await page.waitForTimeout(500) first.`);
+    assert.equal(acceptableOf(r)!.status, 'pass');
+    assert.ok(checkOf(r, 'recommendation').items.some((i) => i.id === 'forbidden:sleep' && i.status === 'review' && i.tag === 'forbidden'));
+    assert.equal(status(r, 'recommendation'), 'review');
+    assert.deepEqual(r.acceptance.pending, ['recommendation']);
+  });
+
+  test('supporting only next to forbidden advice: both reasons are recorded', async () => {
+    const r = await scoreWith('Log the button names, then add a sleep.');
+    assert.equal(acceptableOf(r)!.status, 'review');
+    assert.match(acceptableOf(r)!.detail, /^only a supporting recommendation matched/);
+    assert.ok(checkOf(r, 'recommendation').items.some((i) => i.id === 'forbidden:sleep' && i.status === 'review'));
+  });
+
+  test('no match, or no proposed fix, goes to review as before', async () => {
+    assert.deepEqual(acceptableOf(await scoreWith('Restart the browser.')), { id: 'acceptable', status: 'review', detail: 'no acceptable fix pattern matched', tag: 'acceptable' });
+    assert.deepEqual(acceptableOf(await scoreWith('')), { id: 'acceptable', status: 'review', detail: 'no proposed fix', tag: 'acceptable' });
+  });
+
+  test('an empty acceptable list adds no acceptable item and requires no fix (unchanged)', async () => {
+    const onlyForbidden = await scoreWith(CORRECT, undefined, (t) => (t.recommendations.acceptable = []));
+    assert.equal(acceptableOf(onlyForbidden), undefined);
+    assert.equal(status(onlyForbidden, 'recommendation'), 'not_applicable', 'no item: no acceptable list and no forbidden match');
+    const withSleep = await scoreWith(`${CORRECT} Add a sleep.`, undefined, (t) => (t.recommendations.acceptable = []));
+    assert.deepEqual(checkOf(withSleep, 'recommendation').items.map((i) => `${i.id}=${i.status}`), ['forbidden:sleep=review']);
+    const none = await scoreWith(CORRECT, undefined, (t) => (t.recommendations = { acceptable: [], forbidden: [] }));
+    assert.equal(status(none, 'recommendation'), 'not_applicable');
+    assert.equal(checkOf(none, 'recommendation').detail, 'no recommendation criteria');
+  });
+
+  test('an explicit corrective role scores exactly like an omitted one', async () => {
+    const omitted = await scoreWith(`First log the button names. ${CORRECT}`, undefined, (t) => {
+      roles(t);
+      for (const a of t.recommendations.acceptable) if (a.role === 'corrective') delete a.role;
+    });
+    const explicit = await scoreWith(`First log the button names. ${CORRECT}`, undefined, (t) => {
+      roles(t);
+      for (const a of t.recommendations.acceptable) a.role ??= 'corrective';
+    });
+    assert.deepEqual(explicit.checks, omitted.checks);
+  });
+
+  test('supporting-only records serialize and aggregate like other reviews (not counted as matched)', async () => {
+    const supportingOnly = await scoreWith('Log the button names before clicking.');
+    const corrective = await scoreWith(`First log the button names. ${CORRECT}`);
+    for (const r of [supportingOnly, corrective]) assert.deepEqual(ScoreRecord.parse(JSON.parse(JSON.stringify(r))), r);
+    const summary = aggregate(
+      { formatVersion: 1, runId: 'roles', createdAt: '2026-11-12T00:00:00.000Z', source: 'scorer_validation', description: '' },
+      [
+        { record: { ...supportingOnly, evalId: 'S02-01' }, sha256: 'a'.repeat(64) },
+        { record: { ...corrective, evalId: 'S02-02' }, sha256: 'b'.repeat(64) },
+      ],
+      null,
+    );
+    assert.deepEqual(summary.automatic.recommendation, { passed: { count: 1, of: 2 }, acceptableMatched: { count: 1, of: 2 }, forbiddenHits: 0 });
+    assert.deepEqual(summary.automatic.acceptance.statuses, { accepted: 1, not_accepted: 0, pending_review: 1 });
+  });
+});
+
+describe('recommendation roles on the real truths (scorer v10)', () => {
+  // Each scenario's real recommendations replace S02's (the recommendation check reads nothing else
+  // from the truth), and each acceptable fix is proposed on its own.
+  const acceptableFor = async (id: string, fix: string) => {
+    const real = await loadGroundTruth(id);
+    const r = await scoreEvaluation(withTruth(mutateAnalysis(await inputFor('correct'), (a) => (a.proposedFix = fix)), (t) => (t.recommendations = real.recommendations)));
+    return checkOf(r, 'recommendation').items.find((i) => i.id === 'acceptable');
+  };
+
+  test('only S13 check-status is supporting; every other acceptable fix is corrective', async () => {
+    const roles: string[] = [];
+    for (let n = 1; n <= 14; n++) {
+      const id = `S${String(n).padStart(2, '0')}`;
+      for (const a of (await loadGroundTruth(id)).recommendations.acceptable) if (a.role !== undefined) roles.push(`${id}/${a.id}=${a.role}`);
+    }
+    assert.deepEqual(roles, ['S13/check-status=supporting']);
+  });
+
+  const SUFFICIENT: [scenario: string, fix: string, matched: string][] = [
+    ['S04', 'Investigate the backend endpoint that returns 500.', 'fix-backend'],
+    ['S04', 'No change is needed to the test.', 'keep-test'],
+    ['S05', 'Remove the page.route mock that fulfills the 500.', 'remove-mock'],
+    ['S05', 'Make the mock answer with status: 200.', 'mock-success'],
+    ['S05', 'Expect the error alert that the mocked response produces.', 'expect-error'],
+    ['S07', 'Check the server logs for the intermittent 500.', 'fix-backend'],
+    ['S07', 'The test is correct; no change is needed to the test.', 'keep-test'],
+    ['S08', 'Enable trace collection and capture the network logs on the next failure.', 'collect-evidence'],
+    ['S13', 'Check the server logs for /reports/monthly.csv.', 'fix-server'],
+    ['S13', 'The test is correct and needs no change.', 'keep-test'],
+    ['S14', 'Use a locator instead of the element handle.', 'use-locator'],
+    ['S14', 'Re-query the checkbox after the reset.', 'reacquire'],
+  ];
+  for (const [scenario, fix, matched] of SUFFICIENT) {
+    test(`${scenario} ${matched} alone is still sufficient`, async () => {
+      assert.deepEqual(await acceptableFor(scenario, fix), { id: 'acceptable', status: 'pass', detail: `matched ${matched}`, tag: 'acceptable' });
+    });
+  }
+
+  test('S10 (no failures) has no acceptable fixes, so no acceptable item', async () => {
+    assert.equal(await acceptableFor('S10', 'Nothing to fix.'), undefined);
   });
 });
 

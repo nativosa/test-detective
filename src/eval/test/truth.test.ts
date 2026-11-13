@@ -40,6 +40,20 @@ describe('GroundTruth', () => {
     rejects(withTrace([]), /too_small/);
   });
 
+  test('acceptable fix roles (scorer v10): optional, corrective or supporting, never all supporting', () => {
+    const withFixes = (fixes: Record<string, unknown>[]) => variant((t) => (t.recommendations.acceptable = fixes));
+    const fix = (id: string, extra: Record<string, unknown> = {}) => ({ id, description: 'x', anyOf: ['x'], ...extra });
+    const ok = GroundTruth.safeParse(withFixes([fix('a'), fix('b', { role: 'corrective' }), fix('c', { role: 'supporting' })]));
+    assert.equal(ok.success, true, JSON.stringify(ok.error?.issues));
+    assert.deepEqual(ok.data!.recommendations.acceptable.map((a) => a.role), [undefined, 'corrective', 'supporting'], 'an omitted role stays omitted (corrective)');
+    rejects(withFixes([fix('a', { role: 'optional' })]), /invalid_value/);
+    rejects(withFixes([fix('a', { role: 'supporting' }), fix('b', { role: 'supporting' })]), /at least one corrective entry/);
+    rejects(withFixes([fix('a', { weight: 1 })]), /unrecognized_keys/);
+    assert.equal(GroundTruth.safeParse(withFixes([])).success, true, 'an empty acceptable list stays valid');
+    // Other criteria don't take a role.
+    rejects(variant((t) => (t.rootCause.criteria[0].role = 'supporting')), /unrecognized_keys/);
+  });
+
   test('rejects an invalid regular expression', () => {
     rejects(variant((t) => (t.rootCause.criteria[0].anyOf = ['('])), /valid regular expression/);
   });

@@ -182,6 +182,7 @@
       {
         "id": "check-status",
         "description": "Optionally makes the test fail fast by checking the response status before waiting for the download",
+        "role": "supporting",
         "anyOf": [
           "waitForResponse",
           "response\\.(status|ok)\\(\\)",

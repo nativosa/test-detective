@@ -29,7 +29,8 @@ import type { LeakMarkers } from './workspace.ts';
 //   an MCP error snippet alone does not count as reading the file), or demonstrably false
 //   (nonexistent, outside the workspace, every access failed, or claimed unavailable while present).
 // - Root-cause and recommendation patterns are heuristics: a full match passes, anything else goes
-//   to manual review. They never prove a diagnosis right or wrong.
+//   to manual review. They never prove a diagnosis right or wrong. A recommendation needs a
+//   corrective acceptable fix; a truth's supporting fixes alone go to review.
 // - A label can be right while the investigation is not acceptable: classification verdicts and
 //   acceptance (every check passed, reviews resolved) are reported separately.
 // - A reviewable alternative (a classification the truth file lets a person judge) is never
@@ -68,7 +69,11 @@ import type { LeakMarkers } from './workspace.ts';
 //    runs: a match there that no field accounts for (across fields) goes to review. A field over a
 //    polarity limit gives one forbidden-analysis review item per check (forbidden_incomplete).
 //    Severity "fail", criteria, acceptable fixes and evidence are unchanged.
-export const SCORER_VERSION = 9;
+// 10: an acceptable fix may be marked `role: "supporting"` in the truth (R3b). Only a corrective
+//    match (role omitted or "corrective") passes the recommendation; supporting matches are listed
+//    with "(supporting)", and supporting matches alone go to review. A truth without roles scores
+//    exactly as under 9.
+export const SCORER_VERSION = 10;
 
 export const CATEGORIES = [
   'scored',
@@ -868,11 +873,28 @@ function recommendationCheck({ truth }: Context, matched: Matched[]): Check {
     const hits = acceptable.filter((a) => firstMatch(a.anyOf, text));
     const stepHits = acceptable.filter((a) => !hits.includes(a) && verificationOnly(a.anyOf) && firstMatch(a.anyOf, steps));
     if (acceptable.length > 0) {
-      const matched = [...hits.map((h) => h.id), ...stepHits.map((h) => `${h.id} (in verificationSteps)`)];
+      // A supporting fix is listed but never satisfies the check alone, wherever it matched (v10).
+      const supporting = (a: AcceptableFix) => a.role === 'supporting';
+      const corrective = [...hits, ...stepHits].some((h) => !supporting(h));
+      const label = (a: AcceptableFix, where: string[]) => {
+        const notes = [...where, ...(corrective && supporting(a) ? ['supporting'] : [])];
+        return notes.length > 0 ? `${a.id} (${notes.join(', ')})` : a.id;
+      };
+      const matched = [...hits.map((h) => label(h, [])), ...stepHits.map((h) => label(h, ['in verificationSteps']))];
       items.push(
-        matched.length > 0
+        corrective
           ? { id: 'acceptable', status: 'pass', detail: `matched ${matched.join(', ')}`, tag: 'acceptable' }
-          : { id: 'acceptable', status: 'review', detail: text.trim() === '' ? 'no proposed fix' : 'no acceptable fix pattern matched', tag: 'acceptable' },
+          : matched.length > 0
+            ? {
+                id: 'acceptable',
+                status: 'review',
+                detail: `only a supporting recommendation matched (${matched.join(', ')}); no corrective fix matched (${acceptable
+                  .filter((a) => !supporting(a))
+                  .map((a) => a.id)
+                  .join(', ')})`,
+                tag: 'acceptable',
+              }
+            : { id: 'acceptable', status: 'review', detail: text.trim() === '' ? 'no proposed fix' : 'no acceptable fix pattern matched', tag: 'acceptable' },
       );
     }
     // A forbidden action is flagged wherever it is recommended, including the verification steps.
@@ -1605,6 +1627,7 @@ const HEDGE = /\b(may|might|could|possibly|perhaps|probably|likely|unlikely|uncl
 const NEGATED = /\b(no|not|never|nothing|neither|nor|none)\b|n't\b/i;
 
 type Forbidden = GroundTruth['rootCause']['forbiddenClaims'][number];
+type AcceptableFix = GroundTruth['recommendations']['acceptable'][number];
 
 const quote = (t: string, max = 160) => `"${t.length > max ? `${t.slice(0, max - 3)}...` : t}"`;
 

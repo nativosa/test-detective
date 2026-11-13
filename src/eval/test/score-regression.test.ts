@@ -37,7 +37,7 @@ import type { FakeRunOptions } from './helpers.ts';
 // fixes one must update the case and the README table, not be blocked by it. Cases marked `fixedIn`
 // were limitations under an earlier scorer; `fixedIn.before` keeps the behavior pinned then.
 
-const RECORDED_UNDER = 9;
+const RECORDED_UNDER = 10;
 
 type Classification = ModelInvestigation['classification'];
 type Level = ModelInvestigation['confidence']['level'];
@@ -55,8 +55,10 @@ type Expect = {
   missing?: string[];
   /** Exactly these forbidden claims are flagged (ids without "forbidden:"). Default none. */
   claims?: Flags;
-  /** Exactly these acceptable fixes match; [] means the acceptable item goes to review. */
+  /** Exactly these corrective acceptable fixes match; [] means the acceptable item goes to review. */
   fixes: string[];
+  /** Exactly these supporting fixes (v10) match too: labelled "(supporting)" next to a corrective one, a review alone. Default none. */
+  supporting?: string[];
   /** Exactly these forbidden recommendations are flagged. Default none. */
   bad?: Flags;
   /** The checks that get the one forbidden-analysis review item (a field over a polarity limit). Default none. */
@@ -472,6 +474,15 @@ const S13: Scenario = {
       expect: { verdict: 'reviewable_alternative', fixes: ['fix-server', 'keep-test'], acceptance: 'pending_review', pending: ['classification'] },
     },
     {
+      id: 'S13-B12',
+      category: 'B',
+      about: 'reviewable Environment issue with a supporting-only fix: the classification review and the recommendation review stay separate',
+      classification: 'Environment issue',
+      summary: S13_SUMMARY + CAUTION,
+      fix: 'Add waitForResponse and assert the response status before waiting for the download.',
+      expect: { verdict: 'reviewable_alternative', fixes: [], supporting: ['check-status'], acceptance: 'pending_review', pending: ['classification', 'recommendation'] },
+    },
+    {
       id: 'S13-B3',
       category: 'B',
       about: 'Environment issue without the caution is incorrect',
@@ -599,7 +610,7 @@ const S13: Scenario = {
       category: 'C',
       about: 'server fix plus the optional fail-fast status check',
       fix: 'Restore the CSV attachment response on the server. Optionally, assert the response status with waitForResponse so the test fails fast.',
-      expect: { verdict: 'exact', fixes: ['fix-server', 'check-status'], acceptance: 'accepted' },
+      expect: { verdict: 'exact', fixes: ['fix-server'], supporting: ['check-status'], acceptance: 'accepted' },
     },
     {
       id: 'S13-C2',
@@ -613,10 +624,62 @@ const S13: Scenario = {
     {
       id: 'S13-C5',
       category: 'C',
-      about: 'the optional diagnostic alone is accepted as the fix',
+      about: 'the optional diagnostic alone is not the fix: supporting only, review',
       fix: 'Add waitForResponse and expect response.ok() before waiting for the download.',
-      expect: { verdict: 'exact', fixes: ['check-status'], acceptance: 'accepted' },
-      limitation: { desired: 'an optional diagnostic alone does not satisfy the recommendation (review); the truth has no required-vs-optional distinction' },
+      expect: { verdict: 'exact', fixes: [], supporting: ['check-status'], acceptance: 'pending_review', pending: ['recommendation'] },
+      fixedIn: { version: 10, before: 'check-status matched alone and was accepted; the truth had no required-vs-optional distinction' },
+    },
+    {
+      id: 'S13-C6',
+      category: 'C',
+      about: 'corrective only: investigate the 503 and restore the CSV attachment',
+      fix: 'Investigate why the report endpoint answers HTTP 503 and restore the successful CSV attachment response.',
+      expect: { verdict: 'exact', fixes: ['fix-server'], acceptance: 'accepted' },
+    },
+    {
+      id: 'S13-C7',
+      category: 'C',
+      about: 'supporting only: waitForResponse and a status assertion',
+      fix: 'Add waitForResponse and assert the response status.',
+      expect: { verdict: 'exact', fixes: [], supporting: ['check-status'], acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-C8',
+      category: 'C',
+      about: 'corrective plus supporting: both recorded, accepted',
+      fix: 'Restore the report endpoint so it serves the CSV again, and add a fail-fast assertion on the response status.',
+      expect: { verdict: 'exact', fixes: ['fix-server'], supporting: ['check-status'], acceptance: 'accepted' },
+    },
+    {
+      id: 'S13-C9',
+      category: 'C',
+      about: 'no recommendation at all: review',
+      fix: '',
+      expect: { verdict: 'exact', fixes: [], acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-C10',
+      category: 'C',
+      about: 'supporting advice only in verificationSteps is not matched there (not verification-only), so it never satisfies the check',
+      fix: 'No code change is proposed yet.',
+      steps: ['Add waitForResponse and assert the response status, then re-run npx playwright test tests/ui/reports.spec.ts.'],
+      expect: { verdict: 'exact', fixes: [], acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-C11',
+      category: 'C',
+      about: 'a corrective fix only in verificationSteps is not met there (v7), so supporting advice in proposedFix stays a review',
+      fix: 'Add waitForResponse and assert the response status before waiting for the download.',
+      steps: ['Check the server logs for /reports/monthly.csv.', 'npx playwright test tests/ui/reports.spec.ts'],
+      expect: { verdict: 'exact', fixes: [], supporting: ['check-status'], acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-C12',
+      category: 'C',
+      about: '"Do not fix the server; add waitForResponse." still matches fix-server (acceptable fixes have no polarity)',
+      fix: 'Do not fix the server; add waitForResponse.',
+      expect: { verdict: 'exact', fixes: ['fix-server'], supporting: ['check-status'], acceptance: 'accepted' },
+      limitation: { desired: 'fix-server does not match inside the negated "Do not fix the server", so only the supporting check-status matches: review (recommendation); acceptable-fix polarity is outside R3b' },
     },
     // D. Forbidden recommendations
     { id: 'S13-D1', category: 'D', about: 'mocks the endpoint', fix: 'Mock the endpoint with page.route so it returns a 200.', expect: { verdict: 'exact', fixes: [], bad: { 'mock-it': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] } },
@@ -652,6 +715,20 @@ const S13: Scenario = {
       fix: 'Mock /reports/monthly.csv with route.fulfill, returning the CSV the test expects.',
       expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'mock-it': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
       limitation: { desired: 'fix-server does not match inside a mocking recommendation (the mock still sends it to review, so acceptance is unaffected)' },
+    },
+    {
+      id: 'S13-D10',
+      category: 'D',
+      about: 'supporting plus forbidden: a status assertion and a longer timeout',
+      fix: 'Assert the response status with waitForResponse, and increase the timeout to 60 seconds.',
+      expect: { verdict: 'exact', fixes: [], supporting: ['check-status'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-D11',
+      category: 'D',
+      about: 'corrective plus forbidden: restoring the endpoint does not hide retries as the solution',
+      fix: 'Restore the report endpoint, and add retries: 2 to the config as the solution.',
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { retries: 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
     },
     // E. Negation and clause boundaries
     {
@@ -1130,7 +1207,8 @@ function assertKnownIds(c: Case, truth: GroundTruth) {
   };
   known(c.expect.missing ?? [], truth.rootCause.criteria, 'criterion');
   known(Object.keys(c.expect.claims ?? {}), truth.rootCause.forbiddenClaims, 'forbidden claim');
-  known(c.expect.fixes, truth.recommendations.acceptable, 'acceptable fix');
+  known(c.expect.fixes, truth.recommendations.acceptable.filter((a) => a.role !== 'supporting'), 'corrective acceptable fix');
+  known(c.expect.supporting ?? [], truth.recommendations.acceptable.filter((a) => a.role === 'supporting'), 'supporting acceptable fix');
   known(Object.keys(c.expect.bad ?? {}), truth.recommendations.forbidden, 'forbidden recommendation');
 }
 
@@ -1173,9 +1251,9 @@ describe('R1 regression corpus: harness', () => {
   test('the fixed and remaining limitations are the reviewed ones', () => {
     const all = SCENARIOS.flatMap((s) => s.cases);
     assert.deepEqual(all.filter((c) => c.fixedIn).map((c) => c.id), [
-      'S11-E3', 'S11-E4', 'S11-E5', 'S13-E6', 'S13-E7', 'S13-E8', 'S13-E9', 'S13-E10', 'S14-E3', 'S14-E4', 'S14-E5', 'S14-E6',
+      'S11-E3', 'S11-E4', 'S11-E5', 'S13-C5', 'S13-E6', 'S13-E7', 'S13-E8', 'S13-E9', 'S13-E10', 'S14-E3', 'S14-E4', 'S14-E5', 'S14-E6',
     ]);
-    assert.deepEqual(all.filter((c) => c.limitation).map((c) => c.id), ['S11-C5', 'S11-D8', 'S13-A7', 'S13-C5', 'S13-D9', 'S13-E11', 'S14-C7', 'S14-D8']);
+    assert.deepEqual(all.filter((c) => c.limitation).map((c) => c.id), ['S11-C5', 'S11-D8', 'S13-A7', 'S13-C12', 'S13-D9', 'S13-E11', 'S14-C7', 'S14-D8']);
     assert.ok(all.every((c) => !(c.fixedIn && c.limitation)));
   });
 
@@ -1284,10 +1362,15 @@ for (const s of SCENARIOS) {
 
         // Recommendations: exactly these acceptable fixes, exactly these forbidden ones.
         const acceptable = checkOf(r, 'recommendation').items.find((i) => i.id === 'acceptable')!;
-        if (c.expect.fixes.length === 0) assert.equal(acceptable.status, 'review', `acceptable: ${why}`);
-        else {
+        const supporting = c.expect.supporting ?? [];
+        const supportingOnly = /^only a supporting recommendation matched \((.*)\); no corrective fix matched/.exec(acceptable.detail);
+        if (c.expect.fixes.length > 0) {
           assert.equal(acceptable.status, 'pass', `acceptable: ${why}`);
-          assert.deepEqual(acceptable.detail.replace(/^matched /, '').split(', ').sort(), [...c.expect.fixes].sort(), `acceptable: ${why}`);
+          const listed = [...c.expect.fixes, ...supporting.map((id) => `${id} (supporting)`)];
+          assert.deepEqual(acceptable.detail.replace(/^matched /, '').split(', ').sort(), listed.sort(), `acceptable: ${why}`);
+        } else {
+          assert.equal(acceptable.status, 'review', `acceptable: ${why}`);
+          assert.deepEqual(supportingOnly?.[1]!.split(', ').sort() ?? [], [...supporting].sort(), `acceptable (${acceptable.detail}): ${why}`);
         }
         assert.deepEqual(flags(r, 'recommendation'), c.expect.bad ?? {}, `forbidden recommendations: ${why}`);
         // A truncated analysis: exactly one review item per affected check, none elsewhere.
