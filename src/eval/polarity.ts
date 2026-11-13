@@ -15,16 +15,19 @@
 // are: matching on clause suffixes can only add matches that a lookbehind suppressed because of a
 // negation in an EARLIER clause (S13-E10); a negation in the same clause still suppresses them.
 //
-// Caller-declared breaks (R3c step 1; no caller yet). A caller may add separators the prose rules
+// Caller-declared breaks (R3c step 1). score.ts passes the line breaks of `collapseWhitespace` for
+// acceptable-fix polarity (v11) and for the second, line-aware reading of forbidden items (v12, merged
+// with the reading without breaks so no review is lost). A caller may add separators the prose rules
 // can't see, such as line breaks. A `hard` break is a clause boundary like ". ". A `soft` break is a
 // separator whose role is unknown (a line break may end an instruction or wrap one): each match is
 // judged with and without it, and if the two readings differ the match is ambiguous, so a soft break
 // can never turn a negated match into a positive one. The caller decides which offsets are safe;
 // `lineBreaks` gives a conservative default. Without breaks every result is as before.
 //
-// Clause-local candidates (R3c step 2A; no caller yet). A pattern such as `fix .{0,40}server` can
-// match across clauses ("Fix the server. Actually, don't fix the server"), and the full-text match is
-// greedy, so the clause that holds an instruction may have no match of its own. With
+// Clause-local candidates (R3c step 2A; used for acceptable fixes since v11). A pattern such as
+// `fix .{0,40}server` can match across clauses ("Fix the server. Actually, don't fix the server"),
+// and the full-text match is greedy, so the clause that holds an instruction may have no match of its
+// own. With
 // `candidates: 'clause'` the pattern is also run on each clause alone (soft breaks included), and a
 // match that crosses any boundary is ambiguous (spans_clauses), whatever its reading: only a match
 // inside one clause can be positive. Clause mode also applies three fixed advice word lists (direct
@@ -450,7 +453,7 @@ function checkBreaks(text: string, breaks: readonly Break[]): Break[] {
 }
 
 // ---------------------------------------------------------------------------
-// Endorsement of one acceptable criterion (R3c step 2A; no caller yet)
+// Endorsement of one acceptable criterion (R3c step 2A; used by score.ts since v11)
 
 export type EndorsementVerdict = 'endorsed' | 'rejected' | 'conflict' | 'unresolved' | 'none';
 export type Endorsement = {

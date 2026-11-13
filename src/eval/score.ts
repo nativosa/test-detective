@@ -80,7 +80,12 @@ import type { LeakMarkers } from './workspace.ts';
 //    under "not counted" and never counts. proposedFix is one field; verification-only criteria also
 //    read each verificationSteps entry as its own field (no negation crosses steps). The check's
 //    outcomes, item ids and tags are those of 10, and so is every detail when nothing is discounted.
-export const SCORER_VERSION = 11;
+// 12: review-severity forbidden matches are also read with the field's line breaks (R3d): hard breaks
+//    (blank lines, list items) end a clause, soft ones make a match ambiguous when they change its
+//    reading, and the pattern is also searched from every break. A match is negated only when every
+//    reading that found it negates it, so no review trigger of 11 is ever lost. Cross-field matching,
+//    severity "fail", item ids, tags and every detail of a field without line breaks are those of 11.
+export const SCORER_VERSION = 12;
 
 export const CATEGORIES = [
   'scored',
@@ -1759,13 +1764,45 @@ function crossFieldMatches(pattern: string, parts: string[], texts: string[], pe
 }
 
 /**
+ * v12: one forbidden pattern in one field, read twice. `plain` is the reading of 9–11 (no breaks);
+ * the lined reading adds the field's line breaks from collapseWhitespace (same text, so the spans
+ * agree) and also searches from every break. Matches are merged by span: a span keeps plain's match
+ * unless plain negates it and the lined reading doesn't, and a span only the lined reading found
+ * keeps that reading. So a match is negated only when every reading that found it negates it, and no
+ * review trigger of plain is ever dropped. Truncation of either reading is reported. Without line
+ * breaks, or when the readings agree, `matches` is exactly plain's.
+ */
+function forbiddenReadings(pattern: string, text: string, field: string): { plain: PolarityMatch[]; matches: PolarityMatch[]; truncated: string[] } {
+  const plain = evaluatePolarity(pattern, text);
+  const { text: collapsed, breaks } = collapseWhitespace(stripAnsi(field));
+  // Never expected (both are searchable([field])). If they ever differ the break offsets don't apply,
+  // so only plain's reading is used and the field is reported as not fully analysed.
+  if (collapsed !== text) return { plain: plain.matches, matches: plain.matches, truncated: [...plain.truncated, 'line_breaks'] };
+  if (breaks.length === 0) return { plain: plain.matches, matches: plain.matches, truncated: [...plain.truncated] };
+  const lined = evaluatePolarity(pattern, text, POLARITY_LIMITS, { breaks });
+  const truncated = [...new Set([...plain.truncated, ...lined.truncated])];
+  const bySpan = new Map(plain.matches.map((m) => [`${m.start}:${m.end}`, m]));
+  let changed = false;
+  for (const m of lined.matches) {
+    const key = `${m.start}:${m.end}`;
+    const p = bySpan.get(key);
+    if (!p || (p.polarity === 'negated' && m.polarity !== 'negated')) {
+      bySpan.set(key, m);
+      changed = true;
+    }
+  }
+  if (!changed) return { plain: plain.matches, matches: plain.matches, truncated };
+  return { plain: plain.matches, matches: [...bySpan.values()].sort((a, b) => a.start - b.start || a.end - b.end), truncated };
+}
+
+/**
  * A forbidden claim or recommendation. Severity "review" (the default): each report field is
- * searched on its own (polarity.ts). Any positive or ambiguous match, or a match of v8's joined-text
- * search that no field accounts for (across two fields), goes to review; matches that are all
- * clearly negated leave only an audit item (forbidden_negated, status pass). A truncated analysis
- * is returned in `truncated`; the caller turns all of a check's truncations into one review item.
- * Severity "fail" is judged per sentence: a plain statement fails; a match only in hedged or negated
- * sentences goes to review.
+ * searched on its own (polarity.ts), with and without its line breaks (forbiddenReadings, v12). Any
+ * positive or ambiguous match, or a match of v8's joined-text search that no field accounts for
+ * (across two fields), goes to review; matches that are all clearly negated leave only an audit item
+ * (forbidden_negated, status pass). A truncated analysis is returned in `truncated`; the caller turns
+ * all of a check's truncations into one review item. Severity "fail" is judged per sentence: a plain
+ * statement fails; a match only in hedged or negated sentences goes to review.
  */
 function forbiddenItem(f: Forbidden, fields: Field[], kind: 'claim' | 'recommendation'): { item: Item | null; truncated: Truncation[] } {
   const parts = fields.map((x) => x.text);
@@ -1774,13 +1811,15 @@ function forbiddenItem(f: Forbidden, fields: Field[], kind: 'claim' | 'recommend
     const texts = parts.map((p) => searchable([p]));
     const truncated: Truncation[] = [];
     const perField = texts.map((t, k) => {
-      const result = evaluatePolarity(f.pattern, t);
+      const result = forbiddenReadings(f.pattern, t, parts[k]!);
       for (const limit of result.truncated) truncated.push({ label: fields[k]!.label, limit, id: f.id });
-      return result.matches;
+      return result;
     });
-    const cross = crossFieldMatches(f.pattern, parts, texts, perField);
+    // Accounting for joined-text matches stays on the reading of 9–11, so a break-only match can't
+    // make a cross-field match look accounted for.
+    const cross = crossFieldMatches(f.pattern, parts, texts, perField.map((r) => r.plain));
     if (cross.truncated) truncated.push({ label: 'joined fields', limit: 'max_matches', id: f.id });
-    const matches = perField.flat();
+    const matches = perField.flatMap((r) => r.matches);
     const open = matches.filter((m) => m.polarity !== 'negated');
     const more = (n: number) => (n > DETAIL_MATCHES ? `; ${n - DETAIL_MATCHES} more` : '');
     const cut = truncated.length > 0 ? ' (analysis incomplete, see forbidden-analysis)' : '';

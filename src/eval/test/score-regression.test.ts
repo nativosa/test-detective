@@ -37,7 +37,7 @@ import type { FakeRunOptions } from './helpers.ts';
 // fixes one must update the case and the README table, not be blocked by it. Cases marked `fixedIn`
 // were limitations under an earlier scorer; `fixedIn.before` keeps the behavior pinned then.
 
-const RECORDED_UNDER = 11;
+const RECORDED_UNDER = 12;
 
 type Classification = ModelInvestigation['classification'];
 type Level = ModelInvestigation['confidence']['level'];
@@ -369,6 +369,13 @@ const S11: Scenario = {
       fix: 'Hover over the photo first; do not change the CSS.',
       steps: ['Check the link display after hovering.'],
       expect: { verdict: 'exact', fixes: ['hover-first'], bad: { 'change-app': 'negated' }, acceptance: 'accepted' },
+    },
+    {
+      id: 'S11-E10',
+      category: 'E',
+      about: 'LINE BREAK: a negated force line followed by a list item stays negated, accepted',
+      fix: 'Hover over the photo first.\n\nDo not use force: true.\n- Instead, hover over the element.',
+      expect: { verdict: 'exact', fixes: ['hover-first'], bad: { force: 'negated' }, acceptance: 'accepted' },
     },
   ],
 };
@@ -911,6 +918,93 @@ const S13: Scenario = {
       fix: 'Fix the report endpoint. Another report suggested to increase the timeout, but that would hide the defect.',
       expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
     },
+    // E. Line breaks in forbidden items (scorer v12, R3d)
+    {
+      id: 'S13-E13',
+      category: 'E',
+      about: 'LINE BREAK: the "Don\'t" of one bullet no longer negates the forbidden retries in the next bullet',
+      fix: "Restore the report endpoint.\n- Don't mock it\n- add retries: 2",
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { retries: 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+      fixedIn: { version: 12, before: 'accepted: line breaks collapsed, so "add retries" was negated by the "Don\'t" of the previous bullet' },
+    },
+    {
+      id: 'S13-E14',
+      category: 'E',
+      about: 'LINE BREAK: a timeout increase in its own bullet after a negated one is flagged',
+      fix: "Restore the report endpoint.\n- Don't mock it\n- increase the timeout to 60 seconds",
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+      fixedIn: { version: 12, before: 'accepted: "increase the timeout" was negated by the "Don\'t" of the previous bullet' },
+    },
+    {
+      id: 'S13-E15',
+      category: 'E',
+      about: 'LINE BREAK: a plain line break that changes the reading makes the match ambiguous, so reviewable',
+      fix: "Restore the report endpoint.\n\nDon't add retries\n- increase the timeout.",
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+      fixedIn: { version: 12, before: 'accepted: "increase the timeout" was negated by the "Don\'t" of the previous line' },
+    },
+    {
+      id: 'S13-E16',
+      category: 'E',
+      about: 'LINE BREAK: a forbidden match that the truth lookbehind hid behind a negator on an earlier paragraph is found from the break',
+      fix: "Restore the report endpoint. Don't touch the spec\n\nincrease the timeout.",
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+      fixedIn: { version: 12, before: 'FALSE NEGATIVE: the S13 lookbehind saw "n\'t" across the blank line, nothing was flagged, accepted' },
+    },
+    {
+      id: 'S13-E17',
+      category: 'E',
+      about: 'LINE BREAK: a negation wrapped after "Do not" is found from the break and stays reviewable, never positive',
+      fix: 'Restore the report endpoint.\n\nDo not\nincrease the timeout.',
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+      limitation: { desired: 'the wrapped "Do not⏎increase the timeout" is read as one negated instruction: no finding, accepted' },
+    },
+    {
+      id: 'S13-E18',
+      category: 'E',
+      about: 'LINE BREAK: code after a negated line that introduces it is ambiguous, so reviewable',
+      fix: "Restore the report endpoint.\n\nDo not mock it like this:\n```ts\npage.route('**/api', route => route.fulfill({\n  status: 503,\n  body: 'error'\n}))\n```",
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'mock-it': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+      limitation: { desired: 'the code block is read as the negated example it introduces: mock-it negated, accepted' },
+    },
+    {
+      id: 'S13-E19',
+      category: 'E',
+      about: 'FALSE NEGATIVE: an inline " - " separator is no line break, so "Don\'t" still negates the retries after it',
+      fix: "Restore the report endpoint. Don't mock it - add retries: 2",
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { retries: 'negated' }, acceptance: 'accepted' },
+      limitation: { desired: 'retries flagged ("add retries: 2" is its own instruction after the dash); pending review' },
+    },
+    {
+      id: 'S13-E20',
+      category: 'E',
+      about: 'LINE BREAK: attributed forbidden advice in its own bullet stays ambiguous, so reviewable',
+      fix: 'Restore the report endpoint.\n- Another report suggested "add retries: 2"\n- I would not follow it',
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { retries: 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-E21',
+      category: 'E',
+      about: 'CROSS-FIELD: a match only across proposedFix and a verification step still goes to review',
+      fix: 'Restore the report endpoint and increase the',
+      steps: ['timeout to 60 seconds.\nRun the test again.'],
+      expect: { verdict: 'exact', fixes: ['fix-server'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-E22',
+      category: 'E',
+      about: 'TRUNCATED LINES: a step that only its line breaks push over the clause limit gets the one review finding',
+      // 450 clauses without the line breaks (v11 completes); the 100 list items make it 550.
+      steps: [`Run the test again${', then wait'.repeat(POLARITY_LIMITS.maxClauses - 50)}.${'\n- wait'.repeat(100)}`],
+      expect: { verdict: 'exact', fixes: ['fix-server', 'keep-test'], incomplete: ['recommendation'], acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-E23',
+      category: 'E',
+      about: 'TRUNCATED both readings: still one review finding, as in v11',
+      steps: [`Run the test again${', then wait'.repeat(POLARITY_LIMITS.maxClauses + 5)}.${'\n- then wait'.repeat(10)}`],
+      expect: { verdict: 'exact', fixes: ['fix-server', 'keep-test'], incomplete: ['recommendation'], acceptance: 'pending_review', pending: ['recommendation'] },
+    },
   ],
 };
 
@@ -1243,6 +1337,45 @@ const S14: Scenario = {
       summary: `A race condition is not the cause: the reset replaced the checkbox and the old handle is detached${', in short'.repeat(POLARITY_LIMITS.maxClauses + 5)}.`,
       expect: { verdict: 'exact', claims: { timing: 'negated' }, fixes: ['use-locator'], incomplete: ['root_cause'], acceptance: 'pending_review', pending: ['root_cause'] },
     },
+    // E. Line breaks in forbidden items (scorer v12, R3d)
+    {
+      id: 'S14-E17',
+      category: 'E',
+      about: 'LINE BREAK: retries in their own bullet after a negated force bullet are flagged; the force bullet stays negated',
+      fix: "Use a locator.\n- Don't use force: true\n- add retries: 2",
+      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { force: 'negated', retries: 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+      fixedIn: { version: 12, before: 'accepted: "add retries" was negated by the "Don\'t" of the previous bullet' },
+    },
+    {
+      id: 'S14-E18',
+      category: 'E',
+      about: 'LINE BREAK: bullets that are each negated stay negated, accepted',
+      fix: "Use a locator.\n- Don't use force: true\n- Don't add retries\n- Never add waitForTimeout",
+      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { force: 'negated', retries: 'negated', sleep: 'negated' }, acceptance: 'accepted' },
+    },
+    {
+      id: 'S14-E19',
+      category: 'E',
+      about: 'LINE BREAK: a line ending in "or" makes the next line\'s match ambiguous, so reviewable',
+      fix: 'Use a locator.\nNever use force: true or\nwaitForTimeout.',
+      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { force: 'negated', sleep: 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+      limitation: { desired: 'the negation distributes over the wrapped "or": sleep negated, accepted' },
+    },
+    {
+      id: 'S14-E20',
+      category: 'E',
+      about: 'LINE BREAK: a timing claim in its own bullet after a negated one is flagged in root_cause',
+      summary: 'The reset replaced the checkbox and the old handle is detached.\n- It is not flaky\n- a race condition in the reset',
+      expect: { verdict: 'exact', claims: { timing: 'review' }, fixes: ['use-locator'], acceptance: 'pending_review', pending: ['root_cause'] },
+      fixedIn: { version: 12, before: 'accepted: "race condition" was negated by the "not" of the previous bullet' },
+    },
+    {
+      id: 'S14-E21',
+      category: 'E',
+      about: 'LINE BREAK guard: reported advice before a blank line keeps its review, although the line alone reads negated',
+      fix: 'Use a locator. Another engineer suggested several things\n\nDo not increase the timeout.',
+      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
   ],
 };
 
@@ -1376,9 +1509,10 @@ describe('R1 regression corpus: harness', () => {
   test('the fixed and remaining limitations are the reviewed ones', () => {
     const all = SCENARIOS.flatMap((s) => s.cases);
     assert.deepEqual(all.filter((c) => c.fixedIn).map((c) => c.id), [
-      'S11-E3', 'S11-E4', 'S11-E5', 'S13-C5', 'S13-C12', 'S13-E6', 'S13-E7', 'S13-E8', 'S13-E9', 'S13-E10', 'S14-E3', 'S14-E4', 'S14-E5', 'S14-E6',
+      'S11-E3', 'S11-E4', 'S11-E5', 'S13-C5', 'S13-C12', 'S13-E6', 'S13-E7', 'S13-E8', 'S13-E9', 'S13-E10', 'S13-E13', 'S13-E14', 'S13-E15', 'S13-E16', 'S14-E3', 'S14-E4', 'S14-E5', 'S14-E6', 'S14-E17',
+      'S14-E20',
     ]);
-    assert.deepEqual(all.filter((c) => c.limitation).map((c) => c.id), ['S11-C5', 'S11-D8', 'S13-A7', 'S13-C24', 'S13-C25', 'S13-D9', 'S13-E11', 'S14-C7', 'S14-D8']);
+    assert.deepEqual(all.filter((c) => c.limitation).map((c) => c.id), ['S11-C5', 'S11-D8', 'S13-A7', 'S13-C24', 'S13-C25', 'S13-D9', 'S13-E11', 'S13-E17', 'S13-E18', 'S13-E19', 'S14-C7', 'S14-D8', 'S14-E19']);
     assert.ok(all.every((c) => !(c.fixedIn && c.limitation)));
   });
 
@@ -1428,6 +1562,22 @@ describe('R1 regression corpus: harness', () => {
       assert.match(acceptable.detail, /^no acceptable fix endorsed; not counted: use-locator \(unresolved: "use a locator" positive: no_negation, .*, 47 more, analysis incomplete\)$/, id);
       assert.deepEqual([r.acceptance.status, r.acceptance.pending, r.acceptance.blockers], ['pending_review', ['recommendation'], []], id);
     }
+  });
+
+  test('line breaks (v12): the flagged match is judged in its own line, and a truncated reading is one finding', () => {
+    const caseOf = (id: string) => SCENARIOS.flatMap((s) => s.cases).find((x) => x.id === id)!;
+    const detail = (caseId: string, check: CheckId, itemId: string) => checkOf(recordOf(caseOf(caseId)), check).items.find((i) => i.id === itemId)!.detail;
+    assert.equal(detail('S13-E13', 'recommendation', 'forbidden:retries'), 'suspicious recommendation (Hides the failure with retries): "add retries" in "- add retries: 2" (positive: no_negation)');
+    assert.equal(detail('S13-E13', 'recommendation', 'acceptable'), 'matched fix-server');
+    assert.match(detail('S13-E15', 'recommendation', 'forbidden:more-time'), /^suspicious recommendation \(Raises timeouts\): "increase the timeout" in "Don't add retries - increase the timeout\." \(ambiguous: line_break_scope\)$/);
+    // Both readings negate force, so the v11 match (and its clause excerpt) is kept unchanged.
+    assert.equal(detail('S14-E17', 'recommendation', 'forbidden:force'), 'negated recommendation (Bypasses actionability checks), not counted: "force: true" in "- Don\'t use force: true - add retries: 2" (negated: negator_before)');
+    assert.equal(detail('S14-E20', 'root_cause', 'forbidden:timing'), 'suspicious claim (Blames timing, a race or a reset that had not finished): "race condition" in "- a race condition in the reset" (positive: no_negation)');
+    // The guard case keeps v11's reading: the reported advice makes it ambiguous.
+    assert.match(detail('S14-E21', 'recommendation', 'forbidden:more-time'), /\(ambiguous: quoted_or_reported\)$/);
+    // Only the lined reading of the step reaches the clause limit; both readings reach it in E23, still one entry.
+    assert.match(detail('S13-E22', 'recommendation', 'forbidden-analysis'), /^forbidden recommendation analysis incomplete in verificationSteps\[0\] \(max_clauses\): /);
+    assert.match(detail('S13-E23', 'recommendation', 'forbidden-analysis'), /^forbidden recommendation analysis incomplete in verificationSteps\[0\] \(max_clauses\): /);
   });
 
   test('the cross-field cases really match only across the joined fields, as v8 searched them', async () => {

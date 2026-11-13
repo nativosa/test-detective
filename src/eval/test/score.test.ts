@@ -9,7 +9,7 @@ import { report, success, toolResult, toolUse } from '../../agent/test/helpers.t
 import { leakMarkers } from '../isolation.ts';
 import { aggregate } from '../report.ts';
 import { OUTCOME_FILE, RESULT_FILE, RunOutcome, SCORE_FILE, SCORE_HISTORY_DIR, ScoreConflictError, scoreRun, snapshotInfo, TRANSCRIPT_FILE } from '../runs.ts';
-import { POLARITY_LIMITS } from '../polarity.ts';
+import { evaluatePolarity, POLARITY_LIMITS } from '../polarity.ts';
 import { SCENARIOS_DIR } from '../scenarios.ts';
 import { CHECK_IDS, SCORER_VERSION, ScoreRecord, scoreEvaluation } from '../score.ts';
 import type { Check, CheckId, ScoreInput } from '../score.ts';
@@ -532,6 +532,106 @@ describe('acceptable-fix polarity on the real truths (scorer v11)', () => {
         }
       }
     }
+  });
+});
+
+describe('forbidden items with line breaks (scorer v12)', () => {
+  // Each scenario's real recommendations replace S02's; with `summary`, its real forbidden claims
+  // replace S02's too. Every other check of the 'correct' input passes.
+  const inputWith = async (id: string, fix: string, opts: { steps?: string[]; summary?: string } = {}) => {
+    const real = await loadGroundTruth(id);
+    const input = mutateAnalysis(await inputFor('correct'), (a) => {
+      a.proposedFix = fix;
+      if (opts.steps) a.verificationSteps = opts.steps;
+      if (opts.summary !== undefined) a.failureSummary = opts.summary;
+    });
+    return withTruth(input, (t) => {
+      t.recommendations = real.recommendations;
+      if (opts.summary !== undefined) t.rootCause.forbiddenClaims = real.rootCause.forbiddenClaims;
+    });
+  };
+  const itemOf = (r: ScoreRecord, check: CheckId, id: string) => checkOf(r, check).items.find((i) => i.id === id);
+
+  test('without line breaks, or when both readings agree, every detail is that of v11', async () => {
+    // Recorded under v11 (75af6a5) for the same texts.
+    const inline = await scoreEvaluation(await inputWith('S13', "Restore the report endpoint. Don't mock it - add retries: 2"));
+    assert.equal(itemOf(inline, 'recommendation', 'forbidden:retries')?.detail, 'negated recommendation (Hides the failure with retries), not counted: "add retries" in "Don\'t mock it - add retries: 2" (negated: negator_before)');
+    const agreed = await scoreEvaluation(await inputWith('S11', 'Hover over the photo first.\n\nDo not use force: true.\n- Instead, hover over the element.'));
+    assert.equal(itemOf(agreed, 'recommendation', 'forbidden:force')?.detail, 'negated recommendation (Bypasses actionability checks), not counted: "force: true" in "Do not use force: true" (negated: negator_before)');
+    const cross = await scoreEvaluation(await inputWith('S13', 'Restore the report endpoint and increase the', { steps: ['timeout to 60 s.'] }));
+    assert.equal(itemOf(cross, 'recommendation', 'forbidden:more-time')?.detail, 'suspicious recommendation (Raises timeouts): "increase the timeout" (matched only across report fields)');
+  });
+
+  test('each occurrence is judged on its own: one positive bullet among negated ones is the finding', async () => {
+    const r = await scoreEvaluation(await inputWith('S14', "Use a locator.\n- Don't add retries\n- add retries: 2\n- Don't add retries"));
+    assert.deepEqual(itemOf(r, 'recommendation', 'forbidden:retries'), { id: 'forbidden:retries', status: 'review', detail: 'suspicious recommendation (Relies on retries): "add retries" in "- add retries: 2" (positive: no_negation)', tag: 'forbidden' });
+    assert.equal(r.acceptance.status, 'pending_review');
+  });
+
+  test('a line-break finding serializes and aggregates like any forbidden hit', async () => {
+    const lined = await scoreEvaluation(await inputWith('S13', "Restore the report endpoint.\n- Don't mock it\n- add retries: 2"));
+    const plain = await scoreEvaluation(await inputWith('S13', 'Restore the report endpoint.'));
+    for (const r of [lined, plain]) assert.deepEqual(ScoreRecord.parse(JSON.parse(JSON.stringify(r))), r);
+    const summary = aggregate(
+      { formatVersion: 1, runId: 'lines', createdAt: '2026-11-14T00:00:00.000Z', source: 'scorer_validation', description: '' },
+      [
+        { record: { ...lined, evalId: 'S02-01' }, sha256: 'a'.repeat(64) },
+        { record: { ...plain, evalId: 'S02-02' }, sha256: 'b'.repeat(64) },
+      ],
+      null,
+    );
+    assert.deepEqual(summary.automatic.recommendation, { passed: { count: 1, of: 2 }, acceptableMatched: { count: 2, of: 2 }, forbiddenHits: 1 });
+    assert.deepEqual(summary.automatic.acceptance.statuses, { accepted: 1, not_accepted: 0, pending_review: 1 });
+  });
+
+  test('monotonic: every review trigger of the v11 reading is still a review in v12, for claims and recommendations', async () => {
+    const recs: [fix: string, steps?: string[]][] = [
+      ['Do not add retries; add a sleep instead.'],
+      ['Another report suggested to increase the timeout, but that would hide the defect.'],
+      ['Fix the report endpoint. Do not change anything else and increase the timeout.'],
+      ["Use a locator.\n- Don't add retries\n- add retries: 2\n- Don't add retries"],
+      ['Use a locator. Another engineer suggested several things\n\nDo not increase the timeout.'],
+      ['If the backend may be flaky\n\n- do not add retries or a sleep'],
+      ["Restore the report endpoint.\n- Don't mock it\n- add retries: 2"],
+      ['Never use force: true or\nwaitForTimeout.'],
+      ["Click with { force: true },\n\nthen page.route('**/api') to mock the endpoint."],
+      [`${'Do not add a sleep. '.repeat(55)}Add a sleep.`],
+      ['Restore the report endpoint and increase the', ['timeout to 60 seconds.']],
+    ];
+    const claims = ['It is not a race condition.\n- a race condition in the reset', 'A teammate said\n\n- it is not a race condition', 'The checkbox is not missing\n- the checkbox is missing', 'If the app may be broken\n\nthe app is not broken.'];
+    const flat = (t: string) => t.replace(/\s+/g, ' ');
+    // The v11 reading's triggers: a non-negated per-field match, a truncation, or a match only in the joined text.
+    const triggers = (pattern: string, fields: string[]) => {
+      const results = fields.map((f) => evaluatePolarity(pattern, flat(f)));
+      const joinedOnly = results.every((r) => r.matches.length === 0) && new RegExp(pattern, 'i').test(flat(fields.join('\n')));
+      return { open: joinedOnly || results.some((r) => r.matches.some((m) => m.polarity !== 'negated')), truncated: results.some((r) => r.truncated.length > 0) };
+    };
+    let checked = 0;
+    for (let n = 1; n <= 14; n++) {
+      const id = `S${String(n).padStart(2, '0')}`;
+      const truth = await loadGroundTruth(id);
+      const cases: { fix: string; steps?: string[]; summary?: string }[] = [...recs.map(([fix, steps]) => ({ fix, steps })), ...claims.map((summary) => ({ fix: 'Fix it.', summary }))];
+      for (const c of cases) {
+        const input = await inputWith(id, c.fix, c);
+        const r = await scoreEvaluation(input);
+        const a = (input.result as { value: { investigations: { analysis: ModelInvestigation }[] } }).value.investigations[0]!.analysis;
+        const groups = [
+          { check: 'recommendation' as const, list: truth.recommendations.forbidden, fields: [a.proposedFix, ...a.verificationSteps] },
+          ...(c.summary !== undefined ? [{ check: 'root_cause' as const, list: truth.rootCause.forbiddenClaims, fields: [a.failureSummary, ...a.analysis.map((x) => x.point), a.confidence.justification] }] : []),
+        ];
+        for (const g of groups) {
+          for (const f of g.list.filter((x) => (x.severity ?? 'review') === 'review')) {
+            const v11 = triggers(f.pattern, g.fields);
+            const where = `${id} ${g.check} ${f.id} on ${JSON.stringify(c.summary ?? c.fix).slice(0, 80)}`;
+            // A forbidden_negated audit item (status pass) is not a review.
+            if (v11.open) assert.equal(itemOf(r, g.check, `forbidden:${f.id}`)?.status, 'review', where);
+            if (v11.truncated) assert.equal(itemOf(r, g.check, 'forbidden-analysis')?.status, 'review', where);
+            if (v11.open || v11.truncated) checked++;
+          }
+        }
+      }
+    }
+    assert.ok(checked >= 100, `only ${checked} v11 triggers checked`);
   });
 });
 
