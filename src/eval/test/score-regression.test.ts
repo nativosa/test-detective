@@ -37,7 +37,7 @@ import type { FakeRunOptions } from './helpers.ts';
 // fixes one must update the case and the README table, not be blocked by it. Cases marked `fixedIn`
 // were limitations under an earlier scorer; `fixedIn.before` keeps the behavior pinned then.
 
-const RECORDED_UNDER = 10;
+const RECORDED_UNDER = 11;
 
 type Classification = ModelInvestigation['classification'];
 type Level = ModelInvestigation['confidence']['level'];
@@ -59,6 +59,8 @@ type Expect = {
   fixes: string[];
   /** Exactly these supporting fixes (v10) match too: labelled "(supporting)" next to a corrective one, a review alone. Default none. */
   supporting?: string[];
+  /** Exactly these acceptable fixes matched the regex but are not counted (v11), with their endorsement verdict. Default none. */
+  notCounted?: Record<string, 'rejected' | 'conflict' | 'unresolved'>;
   /** Exactly these forbidden recommendations are flagged. Default none. */
   bad?: Flags;
   /** The checks that get the one forbidden-analysis review item (a field over a polarity limit). Default none. */
@@ -676,10 +678,104 @@ const S13: Scenario = {
     {
       id: 'S13-C12',
       category: 'C',
-      about: '"Do not fix the server; add waitForResponse." still matches fix-server (acceptable fixes have no polarity)',
+      about: '"Do not fix the server; add waitForResponse.": fix-server is rejected (negated), so only the supporting check-status counts: review',
       fix: 'Do not fix the server; add waitForResponse.',
-      expect: { verdict: 'exact', fixes: ['fix-server'], supporting: ['check-status'], acceptance: 'accepted' },
-      limitation: { desired: 'fix-server does not match inside the negated "Do not fix the server", so only the supporting check-status matches: review (recommendation); acceptable-fix polarity is outside R3b' },
+      expect: { verdict: 'exact', fixes: [], supporting: ['check-status'], notCounted: { 'fix-server': 'rejected' }, acceptance: 'pending_review', pending: ['recommendation'] },
+      fixedIn: { version: 11, before: 'accepted: fix-server matched inside the negated "Do not fix the server" (acceptable fixes had no polarity), so check-status was listed as supporting next to it' },
+    },
+    // C (v11). Acceptable-fix polarity
+    {
+      id: 'S13-C13',
+      category: 'C',
+      about: 'v11: positive corrective plus negated supporting: accepted, check-status not counted',
+      fix: 'Restore the CSV attachment on the server; do not add waitForResponse.',
+      expect: { verdict: 'exact', fixes: ['fix-server'], notCounted: { 'check-status': 'rejected' }, acceptance: 'accepted' },
+    },
+    {
+      id: 'S13-C14',
+      category: 'C',
+      about: 'v11: negated corrective alone: rejected, review',
+      fix: 'Do not investigate the backend.',
+      expect: { verdict: 'exact', fixes: [], notCounted: { 'fix-server': 'rejected' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-C15',
+      category: 'C',
+      about: 'v11: a direct retraction of the same fix is a conflict, review',
+      fix: "Fix the server. Actually, don't fix the server.",
+      expect: { verdict: 'exact', fixes: [], notCounted: { 'fix-server': 'conflict' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-C16',
+      category: 'C',
+      about: 'v11: a conflicting criterion does not block another, independently endorsed corrective one',
+      fix: "Fix the server. Actually, don't fix the server. The test is correct.",
+      expect: { verdict: 'exact', fixes: ['keep-test'], notCounted: { 'fix-server': 'conflict' }, acceptance: 'accepted' },
+    },
+    {
+      id: 'S13-C17',
+      category: 'C',
+      about: 'v11: a rejected and an endorsed phrase of one criterion are unresolved (alternative or retraction cannot be told apart)',
+      fix: 'Do not fix the server; fix the backend.',
+      expect: { verdict: 'exact', fixes: [], notCounted: { 'fix-server': 'unresolved' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-C18',
+      category: 'C',
+      about: 'v11: direct first-person advice counts',
+      fix: 'I recommend that you restore the report endpoint.',
+      expect: { verdict: 'exact', fixes: ['fix-server'], acceptance: 'accepted' },
+    },
+    {
+      id: 'S13-C19',
+      category: 'C',
+      about: 'v11: advice reported from someone else alone is unresolved, review',
+      fix: 'Another engineer suggested to fix the server.',
+      expect: { verdict: 'exact', fixes: [], notCounted: { 'fix-server': 'unresolved' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-C20',
+      category: 'C',
+      about: 'v11: earlier advice called wrong is rejected, review',
+      fix: 'The previous suggestion to fix the server was wrong.',
+      expect: { verdict: 'exact', fixes: [], notCounted: { 'fix-server': 'rejected' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S13-C21',
+      category: 'C',
+      about: 'v11: a conditional corrective recommendation counts',
+      fix: 'Fix the server if the 503 is reproducible.',
+      expect: { verdict: 'exact', fixes: ['fix-server'], acceptance: 'accepted' },
+    },
+    {
+      id: 'S13-C22',
+      category: 'C',
+      about: 'v11: list items are separate instructions, so a negated item does not reach the next one',
+      fix: "- Don't increase the timeout\n- Restore the report endpoint",
+      expect: { verdict: 'exact', fixes: ['fix-server'], acceptance: 'accepted' },
+    },
+    {
+      id: 'S13-C23',
+      category: 'C',
+      about: 'v11: a fix followed by a fenced code block',
+      fix: "Restore the CSV attachment in the report handler:\n```\nres.setHeader('Content-Disposition', 'attachment; filename=monthly.csv');\n```",
+      expect: { verdict: 'exact', fixes: ['fix-server'], acceptance: 'accepted' },
+    },
+    {
+      id: 'S13-C24',
+      category: 'C',
+      about: 'v11: a fix wrapped inside its match ("Investigate the⏎backend") crosses a line break of unknown role: unresolved',
+      fix: 'Investigate the\nbackend.',
+      expect: { verdict: 'exact', fixes: [], notCounted: { 'fix-server': 'unresolved' }, acceptance: 'pending_review', pending: ['recommendation'] },
+      limitation: { desired: 'a line wrapped inside one instruction is read as one instruction: fix-server endorsed, accepted' },
+    },
+    {
+      id: 'S13-C25',
+      category: 'C',
+      about: 'v11: a fix on the line after a negated one is ambiguous (the line may continue the negation): unresolved',
+      fix: "Don't add a sleep\nRestore the report endpoint.",
+      expect: { verdict: 'exact', fixes: [], notCounted: { 'fix-server': 'unresolved' }, acceptance: 'pending_review', pending: ['recommendation'] },
+      limitation: { desired: 'separate lines read as separate instructions when they are: fix-server endorsed, accepted' },
     },
     // D. Forbidden recommendations
     { id: 'S13-D1', category: 'D', about: 'mocks the endpoint', fix: 'Mock the endpoint with page.route so it returns a 200.', expect: { verdict: 'exact', fixes: [], bad: { 'mock-it': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] } },
@@ -967,6 +1063,35 @@ const S14: Scenario = {
       expect: { verdict: 'exact', fixes: [], acceptance: 'pending_review', pending: ['recommendation'] },
       limitation: { desired: 'matches reacquire (or use-locator); accepted' },
     },
+    // C (v11). Acceptable-fix polarity
+    {
+      id: 'S14-C8',
+      category: 'C',
+      about: 'v11: a rejected use-locator and an endorsed reacquire are separate criteria: accepted',
+      fix: 'Do not use a Locator; instead reacquire the element.',
+      expect: { verdict: 'exact', fixes: ['reacquire'], notCounted: { 'use-locator': 'rejected' }, acceptance: 'accepted' },
+    },
+    {
+      id: 'S14-C9',
+      category: 'C',
+      about: 'v11: a retracted use-locator (conflict) does not block the endorsed reacquire',
+      fix: "Use a locator. Actually, don't use a locator; re-query the checkbox after the reset.",
+      expect: { verdict: 'exact', fixes: ['reacquire'], notCounted: { 'use-locator': 'conflict' }, acceptance: 'accepted' },
+    },
+    {
+      id: 'S14-C10',
+      category: 'C',
+      about: 'v11: a negated reacquire alone is rejected, review',
+      fix: "Don't re-query the checkbox; use the old handle.",
+      expect: { verdict: 'exact', fixes: [], notCounted: { reacquire: 'rejected' }, acceptance: 'pending_review', pending: ['recommendation'] },
+    },
+    {
+      id: 'S14-C11',
+      category: 'C',
+      about: 'v11: a fix followed by multi-line code',
+      fix: "Replace the handle with a locator:\n```ts\nconst checkbox = page.getByRole('checkbox', { name: 'Email notifications' });\nawait checkbox.check();\n```",
+      expect: { verdict: 'exact', fixes: ['use-locator'], acceptance: 'accepted' },
+    },
     // D. Forbidden recommendations
     { id: 'S14-D1', category: 'D', about: 'fixed wait via setTimeout', fix: 'Wait 500 ms with setTimeout before calling check().', expect: { verdict: 'exact', fixes: [], bad: { sleep: 'review' }, acceptance: 'pending_review', pending: ['recommendation'] } },
     { id: 'S14-D2', category: 'D', about: 'longer timeout', fix: 'Increase the action timeout for check().', expect: { verdict: 'exact', fixes: [], bad: { 'more-time': 'review' }, acceptance: 'pending_review', pending: ['recommendation'] } },
@@ -1093,23 +1218,23 @@ const S14: Scenario = {
     {
       id: 'S14-E13',
       category: 'E',
-      about: 'TRUNCATED CLAUSES: a field with more clauses than the limit gets one review finding although its match is negated',
+      about: 'TRUNCATED CLAUSES: a field with more clauses than the limit gets one review finding although its match is negated (v11: use-locator\'s own analysis is truncated too, so it is unresolved, not counted)',
       fix: `Do not add a sleep; ${'use a locator, '.repeat(POLARITY_LIMITS.maxClauses + 5)}done.`,
-      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { sleep: 'negated' }, incomplete: ['recommendation'], acceptance: 'pending_review', pending: ['recommendation'] },
+      expect: { verdict: 'exact', fixes: [], notCounted: { 'use-locator': 'unresolved' }, bad: { sleep: 'negated' }, incomplete: ['recommendation'], acceptance: 'pending_review', pending: ['recommendation'] },
     },
     {
       id: 'S14-E14',
       category: 'E',
-      about: 'TRUNCATED CLAUSES, no forbidden match: still one review finding, not one per forbidden pattern',
+      about: 'TRUNCATED CLAUSES, no forbidden match: still one review finding, not one per forbidden pattern (v11: use-locator unresolved, as in E13)',
       fix: `${'use a locator, '.repeat(POLARITY_LIMITS.maxClauses + 5)}done.`,
-      expect: { verdict: 'exact', fixes: ['use-locator'], incomplete: ['recommendation'], acceptance: 'pending_review', pending: ['recommendation'] },
+      expect: { verdict: 'exact', fixes: [], notCounted: { 'use-locator': 'unresolved' }, incomplete: ['recommendation'], acceptance: 'pending_review', pending: ['recommendation'] },
     },
     {
       id: 'S14-E15',
       category: 'E',
-      about: 'TRUNCATED CLAUSES with a positive match: the match keeps its own finding next to the incomplete one',
+      about: 'TRUNCATED CLAUSES with a positive match: the match keeps its own finding next to the incomplete one (v11: use-locator unresolved, as in E13)',
       fix: `Increase the timeout; ${'use a locator, '.repeat(POLARITY_LIMITS.maxClauses + 5)}done.`,
-      expect: { verdict: 'exact', fixes: ['use-locator'], bad: { 'more-time': 'review' }, incomplete: ['recommendation'], acceptance: 'pending_review', pending: ['recommendation'] },
+      expect: { verdict: 'exact', fixes: [], notCounted: { 'use-locator': 'unresolved' }, bad: { 'more-time': 'review' }, incomplete: ['recommendation'], acceptance: 'pending_review', pending: ['recommendation'] },
     },
     {
       id: 'S14-E16',
@@ -1251,9 +1376,9 @@ describe('R1 regression corpus: harness', () => {
   test('the fixed and remaining limitations are the reviewed ones', () => {
     const all = SCENARIOS.flatMap((s) => s.cases);
     assert.deepEqual(all.filter((c) => c.fixedIn).map((c) => c.id), [
-      'S11-E3', 'S11-E4', 'S11-E5', 'S13-C5', 'S13-E6', 'S13-E7', 'S13-E8', 'S13-E9', 'S13-E10', 'S14-E3', 'S14-E4', 'S14-E5', 'S14-E6',
+      'S11-E3', 'S11-E4', 'S11-E5', 'S13-C5', 'S13-C12', 'S13-E6', 'S13-E7', 'S13-E8', 'S13-E9', 'S13-E10', 'S14-E3', 'S14-E4', 'S14-E5', 'S14-E6',
     ]);
-    assert.deepEqual(all.filter((c) => c.limitation).map((c) => c.id), ['S11-C5', 'S11-D8', 'S13-A7', 'S13-C12', 'S13-D9', 'S13-E11', 'S14-C7', 'S14-D8']);
+    assert.deepEqual(all.filter((c) => c.limitation).map((c) => c.id), ['S11-C5', 'S11-D8', 'S13-A7', 'S13-C24', 'S13-C25', 'S13-D9', 'S13-E11', 'S14-C7', 'S14-D8']);
     assert.ok(all.every((c) => !(c.fixedIn && c.limitation)));
   });
 
@@ -1293,6 +1418,16 @@ describe('R1 regression corpus: harness', () => {
     assert.match(detail('S14-E15', 'recommendation', 'forbidden:more-time'), /^suspicious recommendation .*"Increase the timeout".* \(analysis incomplete, see forbidden-analysis\)$/);
     // Not counted as a suspicious recommendation (forbiddenHits counts tag "forbidden" only).
     assert.ok(checkOf(recordOf(caseOf('S14-E14')), 'recommendation').items.every((i) => i.tag !== 'forbidden'));
+    // v11: the 505 "use a locator" matches also truncate use-locator's own analysis, so its positive matches
+    // don't endorse it (v10: acceptable passed, "matched use-locator"). Acceptance, pending checks and
+    // blockers are the same as under v10, which already sent these cases to review through forbidden-analysis.
+    for (const id of ['S14-E13', 'S14-E14', 'S14-E15']) {
+      const r = recordOf(caseOf(id));
+      const acceptable = checkOf(r, 'recommendation').items.find((i) => i.id === 'acceptable')!;
+      assert.equal(acceptable.status, 'review', id);
+      assert.match(acceptable.detail, /^no acceptable fix endorsed; not counted: use-locator \(unresolved: "use a locator" positive: no_negation, .*, 47 more, analysis incomplete\)$/, id);
+      assert.deepEqual([r.acceptance.status, r.acceptance.pending, r.acceptance.blockers], ['pending_review', ['recommendation'], []], id);
+    }
   });
 
   test('the cross-field cases really match only across the joined fields, as v8 searched them', async () => {
@@ -1363,11 +1498,15 @@ for (const s of SCENARIOS) {
         // Recommendations: exactly these acceptable fixes, exactly these forbidden ones.
         const acceptable = checkOf(r, 'recommendation').items.find((i) => i.id === 'acceptable')!;
         const supporting = c.expect.supporting ?? [];
-        const supportingOnly = /^only a supporting recommendation matched \((.*)\); no corrective fix matched/.exec(acceptable.detail);
+        // v11: matched but not counted fixes follow "; not counted: " as "<id> (<verdict>: ...)"; they are never in the matched list.
+        const [counted, discounted = ''] = acceptable.detail.split('; not counted: ');
+        const notCounted = Object.fromEntries([...discounted.matchAll(/(?:^|; )([\w-]+) \((rejected|conflict|unresolved):/g)].map((x) => [x[1]!, x[2]!]));
+        assert.deepEqual(notCounted, c.expect.notCounted ?? {}, `not counted (${acceptable.detail}): ${why}`);
+        const supportingOnly = /^only a supporting recommendation matched \((.*)\); no corrective fix (?:matched|endorsed)/.exec(counted!);
         if (c.expect.fixes.length > 0) {
           assert.equal(acceptable.status, 'pass', `acceptable: ${why}`);
           const listed = [...c.expect.fixes, ...supporting.map((id) => `${id} (supporting)`)];
-          assert.deepEqual(acceptable.detail.replace(/^matched /, '').split(', ').sort(), listed.sort(), `acceptable: ${why}`);
+          assert.deepEqual(counted!.replace(/^matched /, '').split(', ').sort(), listed.sort(), `acceptable: ${why}`);
         } else {
           assert.equal(acceptable.status, 'review', `acceptable: ${why}`);
           assert.deepEqual(supportingOnly?.[1]!.split(', ').sort() ?? [], [...supporting].sort(), `acceptable (${acceptable.detail}): ${why}`);

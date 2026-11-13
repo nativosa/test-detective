@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { before, describe, test } from 'node:test';
-import { clauseBoundaries, evaluatePolarity, POLARITY_LIMITS } from '../polarity.ts';
-import type { Polarity, PolarityReason, PolarityResult } from '../polarity.ts';
+import { actionKey, clauseBoundaries, collapseWhitespace, endorsement, evaluatePolarity, lineBreaks, POLARITY_LIMITS } from '../polarity.ts';
+import type { Polarity, PolarityOptions, PolarityReason, PolarityResult } from '../polarity.ts';
 import { listScenarioIds } from '../scenarios.ts';
 import { loadGroundTruth } from '../truth.ts';
 import type { GroundTruth } from '../truth.ts';
@@ -357,5 +357,446 @@ describe('polarity evaluator: determinism and bounds', () => {
     const [m] = evaluatePolarity(patternOf(rec('S14', 'sleep')), input).matches;
     assert.deepEqual([m?.polarity, m?.reason], ['ambiguous', 'clause_too_long']);
     assert.ok(m!.clause.excerpt.length <= POLARITY_LIMITS.maxExcerpt);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Caller-declared breaks (R3c step 1). Patterns are the real S13/S14 ones, forbidden and acceptable.
+
+describe('polarity evaluator: caller breaks', () => {
+  const acceptable = (scenario: string, id: string) => truths.get(scenario)!.recommendations.acceptable.find((a) => a.id === id)!.anyOf;
+  /** Collapses whitespace as the scorer does, keeps the line breaks, and evaluates. */
+  const judged = (pattern: string, raw: string) => {
+    const { text, breaks } = collapseWhitespace(raw);
+    const r = evaluatePolarity(pattern, text, POLARITY_LIMITS, { breaks });
+    assertWellFormed(text, r);
+    return r.matches.map((m) => [m.text, m.polarity, m.reason]);
+  };
+  const FIX = () => acceptable('S13', 'fix-server')[0]!;
+  const MORE = () => patternOf(rec('S14', 'more-time'));
+
+  test('no breaks, an empty list or an empty options object give exactly the previous result (every matrix row)', () => {
+    for (const row of ROWS) {
+      const pattern = patternOf(row.item);
+      const plain = evaluatePolarity(pattern, row.input);
+      assert.deepEqual(evaluatePolarity(pattern, row.input, POLARITY_LIMITS, {}), plain, row.case);
+      assert.deepEqual(evaluatePolarity(pattern, row.input, POLARITY_LIMITS, { breaks: [] }), plain, row.case);
+      assert.deepEqual(clauseBoundaries(row.input, []), clauseBoundaries(row.input), row.case);
+    }
+  });
+
+  test('A: an unmarked line break is soft, so the next line neither inherits the negation nor becomes positive', () => {
+    const raw = "Don't increase the timeout\nInvestigate the backend";
+    assert.deepEqual(collapseWhitespace(raw).breaks.map((b) => b.kind), ['soft']);
+    assert.deepEqual(judged(FIX(), raw), [['Investigate the backend', 'ambiguous', 'line_break_scope']]);
+    assert.deepEqual(judged(MORE(), raw), [['increase the timeout', 'negated', 'negator_before']]);
+    // Without breaks (the scorer today) the negation crosses the line: negated.
+    assert.deepEqual(evaluatePolarity(FIX(), raw.replace(/\s+/g, ' ')).matches.map((m) => m.polarity), ['negated']);
+  });
+
+  test('B: a wrapped negative instruction is never positive', () => {
+    for (const raw of ['Do not\nincrease the timeout.', 'Do not\n\nincrease the timeout.', '- Do not\n- increase the timeout', 'Never\n  increase the timeout']) {
+      assert.deepEqual(judged(MORE(), raw), [['increase the timeout', 'ambiguous', 'line_break_scope']], raw);
+    }
+  });
+
+  test('C: list items of one block are separate instructions (hard), continuation lines included', () => {
+    assert.deepEqual(judged(FIX(), "- Don't increase the timeout\n- Investigate the backend"), [['Investigate the backend', 'positive', 'no_negation']]);
+    assert.deepEqual(judged(MORE(), "- Don't increase the timeout\n- Investigate the backend"), [['increase the timeout', 'negated', 'negator_before']]);
+    assert.deepEqual(judged(FIX(), "1. Don't increase the\n   timeout\n2. Investigate the backend"), [['Investigate the backend', 'positive', 'no_negation']]);
+    // The first item needs no earlier item; a plain line before a list item stays soft.
+    assert.deepEqual(collapseWhitespace("Don't increase the timeout\n- Investigate the backend").breaks.map((b) => b.kind), ['soft']);
+  });
+
+  test('D: line breaks inside code or a call are shielded, so the expression stays one clause', () => {
+    const raw = 'Do not use route.fulfill({\n  status: 200,\n  body: "example"\n})';
+    const status = acceptable('S05', 'mock-success')[0]!;
+    assert.deepEqual(judged(status, raw), [['status: 200', 'negated', 'negator_before']]);
+    assert.deepEqual(judged(status, raw.replace('Do not use', 'Use')), [['status: 200', 'positive', 'no_negation']]);
+    // Breaks inside a fence are shielded; one before the fence is outside the code and stays a real soft break.
+    const sleep = patternOf(rec('S14', 'sleep'));
+    assert.deepEqual(judged(sleep, 'Do not apply this: ```\nawait page.waitForTimeout(500)\n```'), [['waitForTimeout', 'negated', 'negator_before']]);
+    assert.deepEqual(judged(sleep, 'Do not apply this:\n```\nawait page.waitForTimeout(500)\n```'), [['waitForTimeout', 'ambiguous', 'line_break_scope']]);
+  });
+
+  test('E: separate fields (verification steps) are judged one by one, with no breaks needed', () => {
+    const rerun = acceptable('S09', 'rerun');
+    const polarityOf = (step: string) => rerun.flatMap((p) => evaluatePolarity(p, step).matches.map((m) => m.polarity));
+    assert.deepEqual(polarityOf('Do not rerun.'), ['negated']);
+    assert.deepEqual(polarityOf('Run the test again.'), ['positive']);
+    // Joined without a separator, the second step would inherit the negation.
+    assert.deepEqual(polarityOf('Do not rerun the flaky step run the test again'), ['negated', 'negated']);
+  });
+
+  test('a soft break never makes a negated match positive; a hard one decides like ". "', () => {
+    const raw = 'Do not touch it\nincrease the timeout';
+    const { text } = collapseWhitespace(raw);
+    const at = { start: text.indexOf(' increase'), end: text.indexOf(' increase') + 1 };
+    const one = (kind: 'hard' | 'soft') => evaluatePolarity(MORE(), text, POLARITY_LIMITS, { breaks: [{ ...at, kind }] }).matches.map((m) => [m.polarity, m.reason]);
+    assert.deepEqual(evaluatePolarity(MORE(), text).matches.map((m) => [m.polarity, m.reason]), [['negated', 'negator_before']]);
+    assert.deepEqual(one('soft'), [['ambiguous', 'line_break_scope']]);
+    assert.deepEqual(one('hard'), [['positive', 'no_negation']]);
+    // Both kinds on one span: hard wins; repeated spans are kept once.
+    assert.deepEqual(evaluatePolarity(MORE(), text, POLARITY_LIMITS, { breaks: [{ ...at, kind: 'soft' }, { ...at, kind: 'hard' }, { ...at, kind: 'soft' }] }).matches.map((m) => m.polarity), ['positive']);
+  });
+
+  test('a quote left open before a line break keeps the break soft', () => {
+    assert.deepEqual(collapseWhitespace('He wrote "do not\n\nfix the server"').breaks.map((b) => b.kind), ['soft']);
+    assert.deepEqual(collapseWhitespace('He wrote "do not mock".\n\nFix the server.').breaks.map((b) => b.kind), ['hard']);
+  });
+
+  test('collapseWhitespace keeps the scorer text exactly, and every break points at the space that replaced a line break', () => {
+    for (const raw of ["Don't increase the timeout\r\nInvestigate it", '  a\n\n b\tc \n', 'no breaks here', '', '- x\n- y\n\nz']) {
+      const { text, breaks } = collapseWhitespace(raw);
+      assert.equal(text, raw.replace(/\s+/g, ' '), JSON.stringify(raw));
+      assert.equal(breaks.length, lineBreaks(raw).length, JSON.stringify(raw));
+      for (const b of breaks) assert.deepEqual([text.slice(b.start, b.end), b.end - b.start], [' ', 1]);
+    }
+  });
+
+  test('candidate recovery: a soft break adds a clause start, and a match a lookbehind hid there is found but stays ambiguous', () => {
+    const pattern = patternOf(rec('S13', 'more-time'));
+    const { text, breaks } = collapseWhitespace('Do not touch it\nincrease the timeout');
+    assert.equal(new RegExp(pattern, 'i').test(text), false, 'the truth lookbehind hides it on the whole text');
+    assert.deepEqual(evaluatePolarity(pattern, text).matches, []);
+    const [m] = evaluatePolarity(pattern, text, POLARITY_LIMITS, { breaks }).matches;
+    assert.deepEqual([m?.text, m?.via, m?.start, m?.polarity, m?.reason], ['increase the timeout', 'clause_suffix', text.indexOf('increase'), 'ambiguous', 'line_break_scope']);
+  });
+
+  test('a match found on the whole text and again from a break-made clause start is kept once', () => {
+    const { text, breaks } = collapseWhitespace('- Fix it\n- increase the timeout');
+    const r = evaluatePolarity(MORE(), text, POLARITY_LIMITS, { breaks });
+    assert.deepEqual(r.matches.map((m) => [m.text, m.via, m.polarity]), [['increase the timeout', 'full_text', 'positive']]);
+  });
+
+  test('breaks that coincide with prose separators merge into one boundary', () => {
+    const text = 'Fix it. Then wait.';
+    const dot = text.indexOf('. ');
+    assert.deepEqual(clauseBoundaries(text, [{ start: dot + 1, end: dot + 2 }]), clauseBoundaries(text));
+  });
+
+  test('malformed breaks are rejected; more breaks than characters are refused', () => {
+    const text = 'Fix it now';
+    for (const b of [{ start: -1, end: 1 }, { start: 3, end: 3 }, { start: 5, end: 11 }, { start: 1.5, end: 2 }]) {
+      assert.throws(() => evaluatePolarity(MORE(), text, POLARITY_LIMITS, { breaks: [{ ...b, kind: 'soft' }] }), RangeError, JSON.stringify(b));
+    }
+    assert.throws(() => evaluatePolarity(MORE(), text, POLARITY_LIMITS, { breaks: [{ start: 3, end: 4, kind: 'firm' as 'hard' }] }), RangeError);
+    assert.throws(() => evaluatePolarity(MORE(), text, POLARITY_LIMITS, { breaks: Array.from({ length: 11 }, () => ({ start: 3, end: 4, kind: 'soft' as const })) }), RangeError);
+  });
+
+  test('limits still apply: soft breaks count toward maxClauses, and truncation is reported', () => {
+    const raw = `${'Fix it\n'.repeat(10)}increase the timeout`;
+    const { text, breaks } = collapseWhitespace(raw);
+    const r = evaluatePolarity(patternOf(rec('S13', 'more-time')), text, { ...POLARITY_LIMITS, maxClauses: 3 }, { breaks });
+    assert.ok(r.truncated.includes('max_clauses'));
+    const long = collapseWhitespace('Do not add a sleep\n'.repeat(5000));
+    const capped = evaluatePolarity(patternOf(rec('S14', 'sleep')), long.text, POLARITY_LIMITS, { breaks: long.breaks });
+    assert.equal(capped.matches.length, POLARITY_LIMITS.maxMatches);
+    assert.ok(capped.truncated.includes('max_matches'));
+  });
+
+  test('repeated calls agree and options are not mutated', () => {
+    const { text, breaks } = collapseWhitespace("- Don't mock it\n- add retries: 2");
+    const frozen = Object.freeze(breaks.map((b) => Object.freeze({ ...b })));
+    const a = evaluatePolarity(patternOf(rec('S14', 'retries')), text, POLARITY_LIMITS, { breaks: frozen });
+    assert.deepEqual(a, evaluatePolarity(patternOf(rec('S14', 'retries')), text, POLARITY_LIMITS, { breaks: frozen }));
+    assert.deepEqual(a.matches.map((m) => [m.text, m.polarity]), [['add retries', 'positive']]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Conflicting polarity (R3c step 1: characterization of the default candidates; step 2A below adds
+// clause-local candidates and the endorsement policy)
+
+describe('polarity evaluator: conflicting matches of one acceptable pattern (characterization)', () => {
+  const fix = () => truths.get('S13')!.recommendations.acceptable.find((a) => a.id === 'fix-server')!.anyOf[0]!;
+  const out = (text: string, pattern = fix()) => evaluatePolarity(pattern, text).matches.map((m) => [m.text, m.via, m.polarity]);
+
+  test('a greedy match can span a retraction: the spanning match is positive, the retracted part negated', () => {
+    assert.deepEqual(out("Fix the server. Actually, don't fix the server."), [
+      ["Fix the server. Actually, don't fix the server", 'full_text', 'positive'],
+      ['fix the server', 'clause_suffix', 'negated'],
+    ]);
+    assert.deepEqual(out("Fix the server, but don't fix the server."), [
+      ["Fix the server, but don't fix the server", 'full_text', 'positive'],
+      ['fix the server', 'clause_suffix', 'negated'],
+    ]);
+  });
+
+  test('a genuine alternative: the negated match spans into the positive one, which the suffix pass recovers', () => {
+    assert.deepEqual(out('Do not fix the server; fix the backend.'), [
+      ['fix the server; fix the backend', 'full_text', 'negated'],
+      ['fix the backend', 'clause_suffix', 'positive'],
+    ]);
+  });
+
+  test('alternatives in different criteria are judged separately', () => {
+    const s14 = truths.get('S14')!.recommendations.acceptable;
+    const text = 'Do not use a Locator; instead reacquire the element.';
+    const of = (id: string) => s14.find((a) => a.id === id)!.anyOf.flatMap((p) => evaluatePolarity(p, text).matches.map((m) => [m.text, m.polarity]));
+    assert.deepEqual(of('use-locator'), [['use a Locator', 'negated']]);
+    assert.deepEqual(of('reacquire'), [['reacquire', 'positive']]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Clause-local candidates and endorsement (R3c step 2A; no scorer caller yet)
+
+type Span4 = [start: number, end: number, text: string, via: string, polarity: Polarity, reason: PolarityReason];
+
+describe('polarity evaluator: clause-local candidates', () => {
+  const crit = (scenario: string, id: string) => truths.get(scenario)!.recommendations.acceptable.find((a) => a.id === id)!.anyOf;
+  const CLAUSE: PolarityOptions = { candidates: 'clause' };
+  const run = (pattern: string, raw: string) => {
+    const { text, breaks } = collapseWhitespace(raw);
+    const r = evaluatePolarity(pattern, text, POLARITY_LIMITS, { breaks, candidates: 'clause' });
+    assertWellFormed(text, r);
+    return r;
+  };
+  const spans = (r: PolarityResult): Span4[] => r.matches.map((m) => [m.start, m.end, m.text, m.via, m.polarity, m.reason]);
+  /** Every pattern of one criterion, as `endorsement` will receive it. */
+  const criterion = (scenario: string, id: string, raw: string) => crit(scenario, id).map((p) => run(p, raw));
+
+  test('the default stays exactly as before, and only clause mode marks its result', () => {
+    for (const row of ROWS) {
+      const pattern = patternOf(row.item);
+      const plain = evaluatePolarity(pattern, row.input);
+      assert.deepEqual(evaluatePolarity(pattern, row.input, POLARITY_LIMITS, { candidates: 'text' }), plain, row.case);
+      assert.equal('candidates' in plain, false, row.case);
+      assert.equal(evaluatePolarity(pattern, row.input, POLARITY_LIMITS, CLAUSE).candidates, 'clause', row.case);
+    }
+    assert.throws(() => evaluatePolarity('x', 'x', POLARITY_LIMITS, { candidates: 'sentence' as 'clause' }), RangeError);
+  });
+
+  test('clause mode keeps every default match, and nothing that crosses a boundary is positive (every matrix row)', () => {
+    for (const row of ROWS) {
+      const pattern = patternOf(row.item);
+      const wide = evaluatePolarity(pattern, row.input);
+      const local = evaluatePolarity(pattern, row.input, POLARITY_LIMITS, CLAUSE);
+      assertWellFormed(row.input, local);
+      const keys = new Set(local.matches.map((m) => `${m.start}:${m.end}`));
+      for (const m of wide.matches) assert.ok(keys.has(`${m.start}:${m.end}`), `${row.case}: ${m.text} kept`);
+      const bounds = clauseBoundaries(row.input);
+      for (const m of local.matches) {
+        const crosses = bounds.some((b) => b.start < m.end && b.end > m.start);
+        assert.equal(m.reason === 'spans_clauses', crosses, `${row.case}: ${m.text}`);
+        if (m.polarity === 'positive') assert.ok(!crosses, `${row.case}: positive ${m.text} is inside one clause`);
+      }
+    }
+  });
+
+  test('A and B: a retraction of the same instruction is a conflict, in either form', () => {
+    const [fix] = crit('S13', 'fix-server');
+    assert.deepEqual(spans(run(fix!, "Fix the server. Actually, don't fix the server.")), [
+      [0, 14, 'Fix the server', 'clause_local', 'positive', 'no_negation'],
+      [0, 46, "Fix the server. Actually, don't fix the server", 'full_text', 'ambiguous', 'spans_clauses'],
+      [32, 46, 'fix the server', 'clause_local', 'negated', 'negator_before'],
+    ]);
+    assert.deepEqual(spans(run(fix!, "Fix the server, but don't fix the server.")), [
+      [0, 14, 'Fix the server', 'clause_local', 'positive', 'no_negation'],
+      [0, 40, "Fix the server, but don't fix the server", 'full_text', 'ambiguous', 'spans_clauses'],
+      [26, 40, 'fix the server', 'clause_local', 'negated', 'negator_before'],
+    ]);
+    for (const raw of ["Fix the server. Actually, don't fix the server.", "Fix the server, but don't fix the server.", "Don't fix the server. Fix the server."]) {
+      const e = endorsement(criterion('S13', 'fix-server', raw));
+      assert.deepEqual([e.verdict, e.contested, e.endorsing], ['conflict', ['fix the server'], []], raw);
+    }
+  });
+
+  test('C and D: a negated and a positive phrase of one criterion are unresolved, in either order, with the evidence kept', () => {
+    const [fix] = crit('S13', 'fix-server');
+    assert.deepEqual(spans(run(fix!, 'Fix the backend; do not fix the server.')), [
+      [0, 15, 'Fix the backend', 'clause_local', 'positive', 'no_negation'],
+      [0, 38, 'Fix the backend; do not fix the server', 'full_text', 'ambiguous', 'spans_clauses'],
+      [24, 38, 'fix the server', 'clause_local', 'negated', 'negator_before'],
+    ]);
+    assert.deepEqual(spans(run(fix!, 'Do not fix the server; fix the backend.')), [
+      [7, 21, 'fix the server', 'clause_local', 'negated', 'negator_before'],
+      [7, 38, 'fix the server; fix the backend', 'full_text', 'ambiguous', 'spans_clauses'],
+      [23, 38, 'fix the backend', 'clause_local', 'positive', 'no_negation'],
+    ]);
+    for (const [raw, pos, neg] of [['Fix the backend; do not fix the server.', 'Fix the backend', 'fix the server'], ['Do not fix the server; fix the backend.', 'fix the backend', 'fix the server']] as const) {
+      const e = endorsement(criterion('S13', 'fix-server', raw));
+      assert.deepEqual([e.verdict, e.endorsing, e.contested], ['unresolved', [], ['fix the server']], raw);
+      assert.deepEqual(
+        [e.evidence.positive.map((m) => m.text), e.evidence.negated.map((m) => m.text), e.evidence.ambiguous, e.evidence.spanning.length],
+        [[pos], [neg], [], 1],
+        raw,
+      );
+      assert.equal(e.detail, `endorsed "${pos.toLowerCase()}" beside "fix the server" (negated) in the same criterion: an alternative cannot be told from a contradiction`);
+    }
+  });
+
+  test('E: alternatives in different criteria are judged separately (S14)', () => {
+    const raw = 'Do not use a Locator; instead reacquire the element.';
+    assert.deepEqual(criterion('S14', 'use-locator', raw).flatMap(spans), [[7, 20, 'use a Locator', 'clause_local', 'negated', 'negator_before']]);
+    assert.deepEqual(criterion('S14', 'reacquire', raw).flatMap(spans), [[30, 39, 'reacquire', 'clause_local', 'positive', 'no_negation']]);
+    assert.equal(endorsement(criterion('S14', 'use-locator', raw)).verdict, 'rejected');
+    assert.equal(endorsement(criterion('S14', 'reacquire', raw)).verdict, 'endorsed');
+    // A conflict in one criterion leaves another criterion's endorsement as it is.
+    const both = "Reacquire the element. Use a Locator. Actually, don't use a Locator.";
+    assert.equal(endorsement(criterion('S14', 'use-locator', both)).verdict, 'conflict');
+    assert.equal(endorsement(criterion('S14', 'reacquire', both)).verdict, 'endorsed');
+  });
+
+  test('F: rejected advice that matches no pattern of the criterion does not touch it', () => {
+    const raw = 'Fix the server; do not increase the timeout.';
+    assert.deepEqual(criterion('S13', 'fix-server', raw).flatMap(spans), [[0, 14, 'Fix the server', 'clause_local', 'positive', 'no_negation']]);
+    assert.equal(endorsement(criterion('S13', 'fix-server', raw)).verdict, 'endorsed');
+    // A forbidden item sees its own negation, as before (default mode, unchanged; S13's more-time
+    // pattern hides this match with its own lookbehind, so S14's is used).
+    assert.deepEqual(evaluatePolarity(patternOf(rec('S14', 'more-time')), raw).matches.map((m) => [m.text, m.polarity]), [['increase the timeout', 'negated']]);
+  });
+
+  test('G: advice called wrong is a retraction (conflict); advice only discussed stays unresolved', () => {
+    const raw = 'Fix the server. The previous suggestion to fix the server was wrong.';
+    const [fix] = crit('S13', 'fix-server');
+    assert.deepEqual(spans(run(fix!, raw)), [
+      [0, 14, 'Fix the server', 'clause_local', 'positive', 'no_negation'],
+      [43, 57, 'fix the server', 'clause_local', 'negated', 'rejected_advice'],
+    ]);
+    const e = endorsement(criterion('S13', 'fix-server', raw));
+    assert.deepEqual([e.verdict, e.contested], ['conflict', ['fix the server']]);
+    const discussed = endorsement(criterion('S13', 'fix-server', 'Fix the server. The previous suggestion to fix the server was reasonable.'));
+    assert.deepEqual([discussed.verdict, discussed.evidence.ambiguous.map((m) => m.reason)], ['unresolved', ['quoted_or_reported']]);
+    // The advice rules are clause mode only: the default reading of that clause is unchanged.
+    assert.deepEqual(evaluatePolarity(fix!, 'The previous suggestion to fix the server was wrong.').matches.map((m) => m.polarity), ['positive']);
+  });
+
+  test('direct advice: the author\'s own recommendation is endorsed, but never over a negation', () => {
+    const [fix] = crit('S13', 'fix-server');
+    const one = (raw: string) => spans(run(fix!, raw));
+    assert.deepEqual(one('I recommend that you fix the server.'), [[21, 35, 'fix the server', 'clause_local', 'positive', 'direct_advice']]);
+    assert.deepEqual(one('My recommendation is to fix the server.'), [[24, 38, 'fix the server', 'clause_local', 'positive', 'direct_advice']]);
+    assert.deepEqual(one('We suggest you fix the server.'), [[15, 29, 'fix the server', 'clause_local', 'positive', 'direct_advice']]);
+    assert.match(run(fix!, 'I recommend that you fix the server.').matches[0]!.detail, /"I recommend that you"/);
+    // The rest of the clause still decides: a negation stays a negation.
+    assert.deepEqual(one('I recommend that you do not fix the server.'), [[28, 42, 'fix the server', 'clause_local', 'negated', 'negator_before']]);
+    assert.deepEqual(one('My recommendation is not to fix the server.'), [[28, 42, 'fix the server', 'clause_local', 'negated', 'negator_before']]);
+    // Only the exact first-person forms are masked.
+    assert.deepEqual(one('I do not recommend that you fix the server.'), [[28, 42, 'fix the server', 'clause_local', 'ambiguous', 'quoted_or_reported']]);
+    assert.deepEqual(one('I suggested to fix the server.'), [[15, 29, 'fix the server', 'clause_local', 'ambiguous', 'quoted_or_reported']]);
+    assert.deepEqual(one('He said I recommend that you fix the server.'), [[29, 43, 'fix the server', 'clause_local', 'ambiguous', 'quoted_or_reported']]);
+    assert.deepEqual(one('He wrote "I recommend that you fix the server".'), [[31, 45, 'fix the server', 'clause_local', 'ambiguous', 'quoted_or_reported']]);
+    for (const raw of ['I recommend that you fix the server.', 'My recommendation is to fix the server.']) assert.equal(endorsement(criterion('S13', 'fix-server', raw)).verdict, 'endorsed', raw);
+    // Clause mode only: the default reading stays as it was (REPORTED).
+    assert.deepEqual(evaluatePolarity(fix!, 'I recommend that you fix the server.').matches.map((m) => m.reason), ['quoted_or_reported']);
+  });
+
+  test('attributed or discussed advice is not endorsed', () => {
+    const v = (raw: string) => endorsement(criterion('S13', 'fix-server', raw));
+    assert.deepEqual([v('The previous suggestion to fix the server was wrong.').verdict, v('The previous suggestion to fix the server was wrong.').evidence.negated.map((m) => m.reason)], ['rejected', ['rejected_advice']]);
+    assert.equal(v('Another engineer suggested fixing the server.').verdict, 'none', 'no pattern matches the gerund');
+    assert.equal(v('Another engineer suggested to fix the server.').verdict, 'unresolved');
+    assert.deepEqual([v('The recommendation was to fix the server.').verdict, v('The recommendation was to fix the server.').evidence.ambiguous.map((m) => m.reason)], ['unresolved', ['quoted_or_reported']]);
+    assert.equal(v('The previous suggestion to fix the server was reasonable.').verdict, 'unresolved');
+  });
+
+  test('H: matches of one criterion are never read as independent alternatives', () => {
+    const h1 = criterion('S13', 'fix-server', 'Investigate the backend; do not restore the CSV attachment.');
+    assert.deepEqual(h1.map(spans), [[[0, 23, 'Investigate the backend', 'clause_local', 'positive', 'no_negation']], [[32, 58, 'restore the CSV attachment', 'clause_local', 'negated', 'negator_before']], []]);
+    assert.deepEqual([endorsement(h1).verdict, endorsement(h1).contested], ['unresolved', ['restore the csv attachment']]);
+    // The same words through two patterns: both retractions are seen.
+    const h2 = criterion('S13', 'fix-server', 'Check the server logs. Do not check the server logs.');
+    assert.deepEqual(h2.map(spans), [
+      [
+        [0, 16, 'Check the server', 'clause_local', 'positive', 'no_negation'],
+        [0, 46, 'Check the server logs. Do not check the server', 'full_text', 'ambiguous', 'spans_clauses'],
+        [30, 46, 'check the server', 'clause_local', 'negated', 'negator_before'],
+      ],
+      [],
+      [
+        [10, 21, 'server logs', 'clause_local', 'positive', 'no_negation'],
+        [40, 51, 'server logs', 'clause_local', 'negated', 'negator_before'],
+      ],
+    ]);
+    assert.deepEqual([endorsement(h2).verdict, endorsement(h2).contested], ['conflict', ['check the server', 'server logs']]);
+    // A retraction in other words is not taken for an alternative either.
+    assert.equal(endorsement(criterion('S13', 'fix-server', 'Restore the CSV attachment. Actually, do not repair the server.')).verdict, 'unresolved');
+  });
+
+  test('S13-C12 (R1): the only corrective match is negated, so fix-server is rejected', () => {
+    const raw = 'Do not fix the server; add waitForResponse.';
+    assert.deepEqual(criterion('S13', 'fix-server', raw).flatMap(spans), [[7, 21, 'fix the server', 'clause_local', 'negated', 'negator_before']]);
+    assert.equal(endorsement(criterion('S13', 'fix-server', raw)).verdict, 'rejected');
+    assert.equal(endorsement(criterion('S13', 'check-status', raw)).verdict, 'endorsed');
+  });
+
+  test('a match reachable only across a boundary is never an endorsement, but a clause-local one beside it is', () => {
+    const raw = 'Instead of the ElementHandle, use a locator.';
+    assert.deepEqual(criterion('S14', 'use-locator', raw).flatMap(spans), [
+      [0, 43, 'Instead of the ElementHandle, use a locator', 'full_text', 'ambiguous', 'spans_clauses'],
+      [30, 43, 'use a locator', 'clause_local', 'positive', 'no_negation'],
+    ]);
+    assert.equal(endorsement(criterion('S14', 'use-locator', raw)).verdict, 'endorsed');
+    const only = endorsement(criterion('S13', 'fix-server', 'Fix it; the server is fine.'));
+    assert.deepEqual([only.verdict, only.detail], ['unresolved', 'matched only across clause boundaries']);
+  });
+
+  test('line breaks: a match across a soft break is not an instruction, and a soft break never proves endorsement', () => {
+    const [fix] = crit('S13', 'fix-server');
+    assert.deepEqual(spans(run(fix!, 'Fix the\nserver')), [[0, 14, 'Fix the server', 'full_text', 'ambiguous', 'spans_clauses']]);
+    assert.match(run(fix!, 'Fix the\nserver').matches[0]!.detail, /a line break of unknown role/);
+    assert.equal(endorsement(criterion('S13', 'fix-server', 'Fix the\nserver')).verdict, 'unresolved');
+    assert.deepEqual(spans(run(fix!, "Don't increase the timeout\nFix the server")), [[27, 41, 'Fix the server', 'clause_local', 'ambiguous', 'line_break_scope']]);
+    assert.equal(endorsement(criterion('S13', 'fix-server', "Don't increase the timeout\nFix the server")).verdict, 'unresolved');
+    // List items are hard breaks: the second item is its own instruction.
+    assert.deepEqual(spans(run(fix!, "- Don't increase the timeout\n- Fix the server")), [[31, 45, 'Fix the server', 'clause_local', 'positive', 'no_negation']]);
+    assert.equal(endorsement(criterion('S13', 'fix-server', "- Fix the server\n- Don't fix the server")).verdict, 'conflict');
+  });
+
+  test('shielded code stays one clause', () => {
+    const raw = "Use route.fulfill({ status: 200, body: 'ok' }); do not remove the mock.";
+    assert.deepEqual(criterion('S05', 'mock-success', raw).flatMap(spans), [
+      [20, 31, 'status: 200', 'clause_local', 'positive', 'no_negation'],
+    ]);
+    assert.deepEqual(criterion('S05', 'remove-mock', raw).flatMap(spans), [[55, 70, 'remove the mock', 'clause_local', 'negated', 'negator_before']]);
+    assert.deepEqual(criterion('S09', 'rerun', 'Run `npx playwright test; echo done` once.').flatMap(spans), [[5, 24, 'npx playwright test', 'clause_local', 'positive', 'no_negation']]);
+  });
+
+  test('endorsement policy: repetition, mention, ambiguity, rejection and no match', () => {
+    const e = (raw: string) => endorsement(criterion('S13', 'fix-server', raw));
+    const twice = e('Fix the server. Then fix the server again.');
+    assert.deepEqual([twice.verdict, twice.endorsing.map((m) => m.text)], ['endorsed', ['Fix the server', 'fix the server']]);
+    assert.deepEqual([e('Fix the server. Someone suggested to fix the server.').verdict, e('Fix the server. Someone suggested to fix the server.').contested], ['unresolved', ['fix the server']]);
+    assert.deepEqual([e('Fix the backend. Someone suggested to fix the server.').verdict], ['unresolved']);
+    assert.deepEqual([e('Someone suggested to fix the server.').verdict, e('Someone suggested to fix the server.').detail], ['unresolved', 'only ambiguous matches']);
+    assert.deepEqual([e('Do not fix the server. Never fix the backend.').verdict], ['rejected']);
+    assert.deepEqual([e('Add waitForResponse.').verdict], ['none']);
+    assert.equal(actionKey(' `Fix  the Server.` '), 'fix the server');
+  });
+
+  test('without a regex match there is nothing to endorse (the v10 gate keeps deciding)', () => {
+    for (const id of truths.keys()) {
+      for (const a of truths.get(id)!.recommendations.acceptable) {
+        for (const raw of ['Fix the server; do not mock.', 'Investigate further.', 'No change is needed.', 'Use the old handle.']) {
+          const gate = a.anyOf.some((p) => new RegExp(p, 'i').test(raw));
+          const verdict = endorsement(a.anyOf.map((p) => evaluatePolarity(p, raw, POLARITY_LIMITS, CLAUSE))).verdict;
+          if (!gate) assert.equal(verdict, 'none', `${id}/${a.id}: ${raw}`);
+        }
+      }
+    }
+  });
+
+  test('limits: clauses and matches stay bounded, and a truncated analysis is never an endorsement', () => {
+    const [fix] = crit('S13', 'fix-server');
+    const { text, breaks } = collapseWhitespace(`${'- Wait\n'.repeat(10)}- Fix the server`);
+    const few = evaluatePolarity(fix!, text, { ...POLARITY_LIMITS, maxClauses: 3 }, { breaks, candidates: 'clause' });
+    assert.ok(few.truncated.includes('max_clauses'));
+    assert.equal(endorsement([few]).verdict, 'unresolved');
+    const many = evaluatePolarity(fix!, 'Fix the server. '.repeat(500), POLARITY_LIMITS, CLAUSE);
+    assert.equal(many.matches.length, POLARITY_LIMITS.maxMatches);
+    assert.ok(many.truncated.includes('max_matches'));
+    assert.deepEqual([endorsement([many]).verdict, endorsement([many]).detail], ['unresolved', 'the analysis was truncated, so a retraction may be unseen']);
+  });
+
+  test('endorsement takes clause-mode results only; repeated calls agree and inputs are not mutated', () => {
+    assert.throws(() => endorsement([evaluatePolarity(crit('S13', 'fix-server')[0]!, 'Fix the server.')]), TypeError);
+    const { text, breaks } = collapseWhitespace("Fix the server.\n\nActually, don't fix the server.");
+    const frozen: PolarityOptions = Object.freeze({ candidates: 'clause', breaks: Object.freeze(breaks.map((b) => Object.freeze({ ...b }))) });
+    const a = crit('S13', 'fix-server').map((p) => evaluatePolarity(p, text, POLARITY_LIMITS, frozen));
+    assert.deepEqual(a, crit('S13', 'fix-server').map((p) => evaluatePolarity(p, text, POLARITY_LIMITS, frozen)));
+    assert.deepEqual(endorsement(a), endorsement(Object.freeze([...a])));
+    assert.equal(endorsement(a).verdict, 'conflict');
   });
 });

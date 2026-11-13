@@ -9,6 +9,7 @@ import { report, success, toolResult, toolUse } from '../../agent/test/helpers.t
 import { leakMarkers } from '../isolation.ts';
 import { aggregate } from '../report.ts';
 import { OUTCOME_FILE, RESULT_FILE, RunOutcome, SCORE_FILE, SCORE_HISTORY_DIR, ScoreConflictError, scoreRun, snapshotInfo, TRANSCRIPT_FILE } from '../runs.ts';
+import { POLARITY_LIMITS } from '../polarity.ts';
 import { SCENARIOS_DIR } from '../scenarios.ts';
 import { CHECK_IDS, SCORER_VERSION, ScoreRecord, scoreEvaluation } from '../score.ts';
 import type { Check, CheckId, ScoreInput } from '../score.ts';
@@ -427,6 +428,110 @@ describe('recommendation roles on the real truths (scorer v10)', () => {
 
   test('S10 (no failures) has no acceptable fixes, so no acceptable item', async () => {
     assert.equal(await acceptableFor('S10', 'Nothing to fix.'), undefined);
+  });
+});
+
+describe('acceptable-fix polarity on the real truths (scorer v11)', () => {
+  // As above: each scenario's real recommendations replace S02's; every other check of the 'correct'
+  // input passes, so the recommendation decides acceptance.
+  const scoreWith = async (id: string, fix: string, steps?: string[]) => {
+    const real = await loadGroundTruth(id);
+    const input = mutateAnalysis(await inputFor('correct'), (a) => {
+      a.proposedFix = fix;
+      if (steps) a.verificationSteps = steps;
+    });
+    return scoreEvaluation(withTruth(input, (t) => (t.recommendations = real.recommendations)));
+  };
+  const acceptableOf = (r: ScoreRecord) => checkOf(r, 'recommendation').items.find((i) => i.id === 'acceptable')!;
+
+  const CASES: [scenario: string, fix: string, steps: string[] | undefined, status: 'pass' | 'review', detail: string][] = [
+    // keep-test's own negation is inside its pattern: positive (S04, S07, S13 share the patterns' form).
+    ['S04', 'No fix is required in the test; investigate the backend endpoint.', undefined, 'pass', 'matched fix-backend, keep-test'],
+    ['S07', 'The test is correct; no change is needed to the test.', undefined, 'pass', 'matched keep-test'],
+    ['S04', 'Do not assume the test is correct; investigate the backend.', undefined, 'pass', 'matched fix-backend; not counted: keep-test (rejected: "test is correct" negated: negator_before)'],
+    // S05: alternatives in separate criteria.
+    ['S05', 'Do not remove the mock; make the mock answer with status: 200.', undefined, 'pass', 'matched mock-success; not counted: remove-mock (rejected: "remove the mock" negated: negator_before)'],
+    ['S05', 'Remove the route mock. Do not expect the error alert.', undefined, 'pass', 'matched remove-mock; not counted: expect-error (rejected: "expect the error alert" negated: negator_before)'],
+    // S08: collect-evidence (corrective for an inconclusive diagnosis).
+    ['S08', 'Not applied. First collect the trace and the network logs on the next failure.', undefined, 'pass', 'matched collect-evidence'],
+    ['S08', 'Do not collect more logs.', undefined, 'review', 'no acceptable fix endorsed; not counted: collect-evidence (rejected: "collect more logs" negated: negator_before)'],
+    // S09: rerun is verification-only, so each verification step is its own field.
+    ['S09', 'No further change is needed.', ['Run the test again.'], 'pass', 'matched rerun (in verificationSteps)'],
+    ['S09', 'No further change is needed.', ['Do not rerun the test.'], 'review', 'no acceptable fix endorsed; not counted: rerun (rejected: "rerun" negated: negator_before)'],
+    // Joined, v10's text would read "Do not change the code run the test again": the negation stays in its step.
+    ['S09', 'No further change is needed.', ['Do not change the code', 'run the test again'], 'pass', 'matched rerun (in verificationSteps)'],
+    // A negated step and a positive one of the same criterion: unresolved, not a positive-wins.
+    ['S09', 'No further change is needed.', ['Do not rerun the flaky step', 'Run the test again.'], 'review', 'no acceptable fix endorsed; not counted: rerun (unresolved: "rerun" negated: negator_before, "Run the test again" positive: no_negation)'],
+    // Multi-line and code-containing fixes.
+    ['S12', 'Capture the popup:\n```ts\nconst popup = await page.waitForEvent(\'popup\');\n```', undefined, 'pass', 'matched capture-popup'],
+    ['S11', '1. Do not change the CSS.\n2. Hover over the photo first.', undefined, 'pass', 'matched hover-first'],
+  ];
+  for (const [scenario, fix, steps, status, detail] of CASES) {
+    test(`${scenario}: ${JSON.stringify(fix)}${steps ? ` + steps ${JSON.stringify(steps)}` : ''} → ${status}`, async () => {
+      const r = await scoreWith(scenario, fix, steps);
+      assert.deepEqual(acceptableOf(r), { id: 'acceptable', status, detail, tag: 'acceptable' });
+      assert.equal(r.acceptance.status, status === 'pass' && checkOf(r, 'recommendation').status === 'pass' ? 'accepted' : 'pending_review', JSON.stringify(checkOf(r, 'recommendation').items));
+    });
+  }
+
+  test('S10 stays not applicable: no acceptable fixes, no forbidden ones', async () => {
+    const r = await scoreWith('S10', 'Do not fix anything.');
+    assert.equal(checkOf(r, 'recommendation').status, 'not_applicable');
+  });
+
+  test('a truncated analysis is never an endorsement; a discounted criterion is never listed as matched; details stay bounded', async () => {
+    // 80 matches of fix-server: over maxMatches, so unresolved even though positive matches were seen.
+    const r = await scoreWith('S13', `${"Fix the server. Don't fix the server. ".repeat(40)}Add waitForResponse.`);
+    const { detail, status } = acceptableOf(r);
+    assert.equal(status, 'review');
+    assert.match(detail, /^only a supporting recommendation matched \(check-status\); no corrective fix endorsed \(fix-server, keep-test\); not counted: fix-server \(unresolved: .*, 47 more, analysis incomplete\)$/);
+    assert.ok(detail.length <= 600, `${detail.length} characters`);
+    // Within the limits, the same retraction is a conflict.
+    assert.match(acceptableOf(await scoreWith('S13', "Fix the server. Don't fix the server. ".repeat(4))).detail, /^no acceptable fix endorsed; not counted: fix-server \(conflict: .*, 5 more\)$/);
+  });
+
+  test('truncation invariant: a positive match before the limit never endorses when the contradiction lies beyond it', async () => {
+    const early = 'Fix the server. ';
+    const late = 'Do not fix the server.';
+    // maxMatches: 60 more fix-server matches between the early positive and the late negation.
+    const byMatches = `${early}${'Check the backend. '.repeat(60)}${late}`;
+    // maxClauses: the late negation sits after more clauses than the analysis reads.
+    const byClauses = `${early.replace('. ', '; ')}${'wait, '.repeat(POLARITY_LIMITS.maxClauses + 5)}${late}`;
+    for (const [limit, fix] of [['maxMatches', byMatches], ['maxClauses', byClauses]] as const) {
+      const r = await scoreWith('S13', fix);
+      const { detail, status } = acceptableOf(r);
+      assert.equal(status, 'review', limit);
+      assert.match(detail, /^no acceptable fix endorsed; not counted: fix-server \(unresolved: .*analysis incomplete\)$/, limit);
+      assert.equal(checkOf(r, 'recommendation').status, 'review', limit);
+      assert.equal(r.acceptance.status, 'pending_review', limit);
+      assert.ok(detail.length <= 600, `${limit}: ${detail.length} characters`);
+    }
+    // A separate corrective criterion endorsed within the limits still suffices (maxMatches is per pattern) ...
+    const independent = await scoreWith('S13', `The test is correct. ${byMatches}`);
+    assert.match(acceptableOf(independent).detail, /^matched keep-test; not counted: fix-server \(unresolved: .*analysis incomplete\)$/);
+    assert.equal(independent.acceptance.status, 'accepted');
+    // ... but a field over maxClauses is incomplete as a whole, so nothing in it endorses.
+    const wholeField = await scoreWith('S13', `The test is correct; ${byClauses}`);
+    assert.match(acceptableOf(wholeField).detail, /^no acceptable fix endorsed; not counted: fix-server \(unresolved: .*analysis incomplete\); keep-test \(unresolved: .*analysis incomplete\)$/);
+    assert.equal(wholeField.acceptance.status, 'pending_review');
+  });
+
+  test('monotonic: every counted criterion matched v10\'s regex on the same text', async () => {
+    const texts = [...CASES.map(([, fix]) => fix), 'Fix the server; do not mock it.', 'I recommend that you investigate the backend.', 'Re-query the checkbox.', 'Use a locator.', 'Hover over the photo first.'];
+    for (let n = 1; n <= 14; n++) {
+      const id = `S${String(n).padStart(2, '0')}`;
+      const { acceptable } = (await loadGroundTruth(id)).recommendations;
+      for (const fix of texts) {
+        const item = acceptableOf(await scoreWith(id, fix, ['Run the test again.'])) as { detail: string } | undefined;
+        if (!item) continue;
+        const counted = /^matched (.*?)(?:; not counted: |$)/.exec(item.detail)?.[1] ?? /^only a supporting recommendation matched \((.*?)\)/.exec(item.detail)?.[1] ?? '';
+        for (const label of counted.split(', ').filter(Boolean)) {
+          const a = acceptable.find((x) => x.id === label.split(' ')[0])!;
+          const where = label.includes('in verificationSteps') ? 'Run the test again.' : fix.replace(/\s+/g, ' ');
+          assert.ok(a.anyOf.some((p) => new RegExp(p, 'i').test(where)), `${id}/${a.id} counted without a v10 match in ${JSON.stringify(where)}`);
+        }
+      }
+    }
   });
 });
 

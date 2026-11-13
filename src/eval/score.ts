@@ -7,8 +7,8 @@ import type { ModelInvestigation, RunStatus } from '../agent/result.ts';
 import { FailureDetailsOutput, ListFailuresOutput } from '../mcp/report.ts';
 import { TraceSummaryOutput } from '../mcp/trace-summary.ts';
 import { auditTranscript, resolveFrom } from './isolation.ts';
-import { evaluatePolarity, POLARITY_LIMITS } from './polarity.ts';
-import type { PolarityMatch } from './polarity.ts';
+import { collapseWhitespace, endorsement, evaluatePolarity, POLARITY_LIMITS } from './polarity.ts';
+import type { Endorsement, PolarityMatch, PolarityResult } from './polarity.ts';
 import type { Finding } from './isolation.ts';
 import type { RunOutcome } from './runs.ts';
 import { CONFIDENCE_LEVELS } from './truth.ts';
@@ -73,7 +73,14 @@ import type { LeakMarkers } from './workspace.ts';
 //    match (role omitted or "corrective") passes the recommendation; supporting matches are listed
 //    with "(supporting)", and supporting matches alone go to review. A truth without roles scores
 //    exactly as under 9.
-export const SCORER_VERSION = 10;
+// 11: acceptable fixes have polarity (R3c). v10's regex match stays the gate; each matched criterion
+//    is then judged by polarity.ts in clause mode (clause-local matches, line breaks from
+//    collapseWhitespace, direct versus reported advice) and `endorsement` over all its patterns. Only
+//    an endorsed criterion counts for its role; a rejected, conflicting or unresolved one is listed
+//    under "not counted" and never counts. proposedFix is one field; verification-only criteria also
+//    read each verificationSteps entry as its own field (no negation crosses steps). The check's
+//    outcomes, item ids and tags are those of 10, and so is every detail when nothing is discounted.
+export const SCORER_VERSION = 11;
 
 export const CATEGORIES = [
   'scored',
@@ -870,31 +877,41 @@ function recommendationCheck({ truth }: Context, matched: Matched[]): Check {
     }
     const text = searchable([m.analysis.proposedFix]);
     const steps = searchable(m.analysis.verificationSteps);
+    // The v10 regex match is the gate: v11 never counts a criterion that v10 didn't match.
     const hits = acceptable.filter((a) => firstMatch(a.anyOf, text));
     const stepHits = acceptable.filter((a) => !hits.includes(a) && verificationOnly(a.anyOf) && firstMatch(a.anyOf, steps));
     if (acceptable.length > 0) {
+      // v11: a matched criterion counts only when its matches endorse it (polarity.ts endorsement).
+      const fields = (a: AcceptableFix) => (verificationOnly(a.anyOf) ? [m.analysis!.proposedFix, ...m.analysis!.verificationSteps] : [m.analysis!.proposedFix]);
+      const judged = [...hits, ...stepHits].map((a) => ({ a, inSteps: stepHits.includes(a), ...acceptableEndorsement(a, fields(a)) }));
+      const endorsed = judged.filter((j) => j.endorsement.verdict === 'endorsed');
+      const discounted = judged.filter((j) => j.endorsement.verdict !== 'endorsed');
+      const notCounted = discounted.length > 0 ? `; not counted: ${discounted.map(describeDiscounted).join('; ')}` : '';
       // A supporting fix is listed but never satisfies the check alone, wherever it matched (v10).
       const supporting = (a: AcceptableFix) => a.role === 'supporting';
-      const corrective = [...hits, ...stepHits].some((h) => !supporting(h));
+      const corrective = endorsed.some((j) => !supporting(j.a));
       const label = (a: AcceptableFix, where: string[]) => {
         const notes = [...where, ...(corrective && supporting(a) ? ['supporting'] : [])];
         return notes.length > 0 ? `${a.id} (${notes.join(', ')})` : a.id;
       };
-      const matched = [...hits.map((h) => label(h, [])), ...stepHits.map((h) => label(h, ['in verificationSteps']))];
+      const matched = endorsed.map((j) => label(j.a, j.inSteps ? ['in verificationSteps'] : []));
+      const correctiveDiscounted = discounted.some((j) => !supporting(j.a));
       items.push(
         corrective
-          ? { id: 'acceptable', status: 'pass', detail: `matched ${matched.join(', ')}`, tag: 'acceptable' }
+          ? { id: 'acceptable', status: 'pass', detail: `matched ${matched.join(', ')}${notCounted}`, tag: 'acceptable' }
           : matched.length > 0
             ? {
                 id: 'acceptable',
                 status: 'review',
-                detail: `only a supporting recommendation matched (${matched.join(', ')}); no corrective fix matched (${acceptable
+                detail: `only a supporting recommendation matched (${matched.join(', ')}); no corrective fix ${correctiveDiscounted ? 'endorsed' : 'matched'} (${acceptable
                   .filter((a) => !supporting(a))
                   .map((a) => a.id)
-                  .join(', ')})`,
+                  .join(', ')})${notCounted}`,
                 tag: 'acceptable',
               }
-            : { id: 'acceptable', status: 'review', detail: text.trim() === '' ? 'no proposed fix' : 'no acceptable fix pattern matched', tag: 'acceptable' },
+            : discounted.length > 0
+              ? { id: 'acceptable', status: 'review', detail: `no acceptable fix endorsed${notCounted}`, tag: 'acceptable' }
+              : { id: 'acceptable', status: 'review', detail: text.trim() === '' ? 'no proposed fix' : 'no acceptable fix pattern matched', tag: 'acceptable' },
       );
     }
     // A forbidden action is flagged wherever it is recommended, including the verification steps.
@@ -1596,8 +1613,12 @@ const rank = (level: string) => ['Low', 'Medium', 'High'].indexOf(level);
 
 /** Text for pattern matching: ANSI escapes removed, whitespace collapsed. Patterns are case-insensitive. */
 function searchable(parts: string[]): string {
+  return stripAnsi(parts.join('\n')).replace(/\s+/g, ' ');
+}
+
+function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
-  return parts.join('\n').replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').replace(/\s+/g, ' ');
+  return text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '');
 }
 
 function firstMatch(patterns: string[], text: string): string | null {
@@ -1636,6 +1657,43 @@ const DETAIL_MATCHES = 3;
 
 function describeMatch(m: PolarityMatch): string {
   return `${quote(m.text, 80)} in ${quote(m.clause.excerpt)} (${m.polarity}: ${m.reason})`;
+}
+
+/**
+ * v11: the endorsement of one acceptable criterion that v10's regex matched. Every pattern is judged
+ * in clause mode on each field: the field is exactly searchable([field]) (collapseWhitespace keeps its
+ * line breaks as hard or soft breaks), so a field is never joined to another and no negation crosses
+ * fields. Match offsets are shifted past the earlier fields, so `endorsement` sees each match once and
+ * a positive match in one field and a negated one in another still conflict. A gated criterion with no
+ * per-field match (it matched only across joined fields) is unresolved, never endorsed.
+ */
+function acceptableEndorsement(a: AcceptableFix, fields: string[]): { endorsement: Endorsement; truncated: boolean } {
+  const results: PolarityResult[] = [];
+  let offset = 0;
+  for (const field of fields) {
+    const { text, breaks } = collapseWhitespace(stripAnsi(field));
+    for (const p of a.anyOf) {
+      const r = evaluatePolarity(p, text, POLARITY_LIMITS, { breaks, candidates: 'clause' });
+      const shift = (s: { start: number; end: number }) => ({ start: s.start + offset, end: s.end + offset });
+      results.push({ ...r, matches: r.matches.map((x) => ({ ...x, ...shift(x), clause: { ...x.clause, ...shift(x.clause) } })) });
+    }
+    offset += text.length + 1;
+  }
+  const e = endorsement(results);
+  const truncated = results.some((r) => r.truncated.length > 0);
+  if (e.verdict !== 'none') return { endorsement: e, truncated };
+  return { endorsement: { ...e, verdict: 'unresolved', detail: 'matched only across report fields' }, truncated };
+}
+
+/** A matched acceptable fix that doesn't count (v11), with at most DETAIL_MATCHES of its matches. */
+function describeDiscounted({ a, endorsement: e, truncated }: { a: AcceptableFix; endorsement: Endorsement; truncated: boolean }): string {
+  const { positive, negated, ambiguous, spanning } = e.evidence;
+  const local = [...positive, ...negated, ...ambiguous].sort((x, y) => x.start - y.start);
+  const shown = local.slice(0, DETAIL_MATCHES).map((m) => `${quote(m.text, 60)} ${m.polarity}: ${m.reason}`);
+  if (local.length > DETAIL_MATCHES) shown.push(`${local.length - DETAIL_MATCHES} more`);
+  if (local.length === 0) shown.push(spanning.length > 0 ? 'matched only across clause boundaries' : 'matched only across report fields');
+  if (truncated) shown.push('analysis incomplete');
+  return `${a.id} (${e.verdict}: ${shown.join(', ')})`;
 }
 
 /** A report field searched for forbidden patterns; `label` names it in item details. */
