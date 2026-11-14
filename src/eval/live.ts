@@ -1,8 +1,9 @@
+import { execFile } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArgs } from 'node:util';
+import { parseArgs, promisify } from 'node:util';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { parseCliArgs } from '../agent/args.ts';
@@ -19,8 +20,8 @@ import { ScenarioId, SCENARIOS_DIR, scenarioDir, TRUTH_FILE } from './scenarios.
 import type { ScoreRecord } from './score.ts';
 import { loadSnapshot, MANIFEST_FILE, sha256, SNAPSHOTS_DIR } from './snapshots.ts';
 import { loadGroundTruth } from './truth.ts';
-import { checkIntegrity, CONFIG_FILES, createWorkspace, removeWorkspace, WorkspaceRemovalError } from './workspace.ts';
-import type { RemovalOptions, Workspace } from './workspace.ts';
+import { checkIntegrity, CONFIG_FILES, createWorkspace, defaultProtectedRoots, removeWorkspace, withShortNameAliases, WorkspaceRemovalError } from './workspace.ts';
+import type { RemovalOptions, ShortPathLookup, Workspace } from './workspace.ts';
 
 // Live evaluation adapter: ONE scenario per invocation, one session, no retries.
 //
@@ -137,6 +138,8 @@ export type LiveDeps = {
   sdkVersion?: string | null;
   /** Workspace removal deadline and fs seams (tests). Default: removeWorkspace's own. */
   removal?: RemovalOptions;
+  /** Short (8.3) path lookup for the protected roots. Default: windowsShortPaths. */
+  shortPaths?: ShortPathLookup;
 };
 
 export type LiveResult = {
@@ -203,7 +206,9 @@ export async function runLiveEvaluation(request: LiveRequest, deps: LiveDeps): P
     const snapshot = await loadSnapshot(scenarioId, snapshotsRoot);
     outcome.snapshot = { reportFingerprint: snapshot.manifest.reportFingerprint, manifestSha256: sha256(await readFile(path.join(snapshot.dir, MANIFEST_FILE))) };
     const markers = await leakMarkers(scenariosRoot);
-    workspace = await createWorkspace(snapshot, { repoRoot: deps.repoRoot, parent: deps.workParent }, markers);
+    // Every 8.3 spelling of the protected roots gets its own deny rule and audit root; a failed lookup is a setup failure.
+    const protectedRoots = await withShortNameAliases(defaultProtectedRoots(deps.repoRoot), deps.shortPaths ?? windowsShortPaths);
+    workspace = await createWorkspace(snapshot, { repoRoot: deps.repoRoot, parent: deps.workParent, protectedRoots }, markers);
     outcome.workspace = { root: workspace.root, protectedRoots: workspace.protectedRoots, auditBefore: { ok: true, problems: [] }, integrityAfter: null };
     const context: IsolationContext = { repoRoot: deps.repoRoot, workspace };
     outcome.configDifferences = describeDifferences(args, context, env);
@@ -303,6 +308,41 @@ export function sanitizeOptions(options: Options): Record<string, unknown> {
     }),
   ) as Record<string, unknown>;
 }
+
+/**
+ * Asks Windows for the short (8.3) path of each absolute drive path through Scripting.FileSystemObject
+ * (GetShortPathName). The script is a constant and the paths travel as JSON in an environment
+ * variable, so no path text is ever parsed as a command. Empty input or a non-Windows host needs no
+ * lookup; anything unexpected throws, and the evaluation fails closed before its session.
+ */
+export async function windowsShortPaths(paths: string[]): Promise<(string | null)[]> {
+  if (paths.length === 0) return [];
+  if (process.platform !== 'win32') return paths.map(() => null);
+  for (const p of paths) {
+    if (!/^[A-Za-z]:\\/.test(p) || /[\u0000-\u001f]/.test(p)) throw new Error(`Short path lookup refuses ${JSON.stringify(p)}: not an absolute drive path.`);
+  }
+  const powershell = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const { stdout } = await promisify(execFile)(powershell, ['-NoProfile', '-NonInteractive', '-Command', SHORT_PATH_SCRIPT], {
+    env: { ...process.env, [SHORT_PATHS_ENV]: JSON.stringify(paths) },
+    encoding: 'utf8',
+    timeout: 30_000,
+    windowsHide: true,
+  });
+  const answers: unknown = JSON.parse(stdout.replace(/^\uFEFF/, ''));
+  if (!Array.isArray(answers) || answers.length !== paths.length || !answers.every((a) => typeof a === 'string')) {
+    throw new Error('Short path lookup returned unexpected output.');
+  }
+  return answers.map((a: string) => (a === '' ? null : a));
+}
+
+const SHORT_PATHS_ENV = 'TD_SHORT_PATHS';
+const SHORT_PATH_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false',
+  '$fso = New-Object -ComObject Scripting.FileSystemObject',
+  `$out = @(foreach ($p in (ConvertFrom-Json $env:${SHORT_PATHS_ENV})) { if ($fso.FolderExists($p)) { $fso.GetFolder($p).ShortPath } elseif ($fso.FileExists($p)) { $fso.GetFile($p).ShortPath } else { '' } })`,
+  'ConvertTo-Json -Compress -InputObject $out',
+].join('\n');
 
 async function installedSdkVersion(repoRoot: string): Promise<string | null> {
   try {

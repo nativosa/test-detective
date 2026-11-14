@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { existsSync, realpathSync } from 'node:fs';
+import { mkdir, readFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, test } from 'node:test';
 import type { TestContext } from 'node:test';
@@ -24,7 +25,8 @@ import {
   STRUCTURED_OUTPUT_TOOL,
 } from '../isolation.ts';
 import type { IsolationContext } from '../isolation.ts';
-import { createWorkspace, removeWorkspace } from '../workspace.ts';
+import { createWorkspace, defaultProtectedRoots, isInside, MAX_ROOT_SPELLINGS, projectSlug, removeWorkspace, withShortNameAliases } from '../workspace.ts';
+import type { ShortPathLookup } from '../workspace.ts';
 import { fakeSnapshot, tempDir } from './helpers.ts';
 
 // The evaluation session config (built from the unchanged production builder) and the transcript
@@ -49,9 +51,248 @@ describe('deny rules', () => {
     assert.equal(rulePath('/home/me/repo'), '//home/me/repo');
   });
 
-  test('cover the repo and ~/.claude', () => {
+  test('cover the repo and ~/.claude, each also in lower case on Windows', () => {
     const claude = path.join(homedir(), '.claude');
-    assert.deepEqual(evalDenyRules([REPO_ROOT, claude]), [`Read(${rulePath(REPO_ROOT)}/**)`, `Read(${rulePath(claude)}/**)`, 'Read(~/.claude/**)']);
+    const lower = (p: string) => (process.platform === 'win32' ? [`Read(${rulePath(p).toLowerCase()}/**)`] : []);
+    const expected = [...new Set([`Read(${rulePath(REPO_ROOT)}/**)`, ...lower(REPO_ROOT), `Read(${rulePath(claude)}/**)`, ...lower(claude), 'Read(~/.claude/**)'])];
+    assert.deepEqual(evalDenyRules([REPO_ROOT, claude]), expected);
+  });
+
+  test('rulePath gives one spelling for backslashes, forward slashes, mixed separators, trailing separators and spaces', () => {
+    for (const p of ['C:\\GIT\\test-detective', 'C:/GIT/test-detective', 'C:\\GIT/test-detective\\', 'c:\\GIT\\test-detective']) assert.equal(rulePath(p), '//c/GIT/test-detective', p);
+    assert.equal(rulePath('C:\\Program Files\\My Repo\\'), '//c/Program Files/My Repo');
+  });
+
+  test('Windows roots also get an all-lower-case rule; duplicates are dropped, first occurrence kept', () => {
+    assert.deepEqual(evalDenyRules(['C:\\GIT\\test-detective', 'C:\\git\\test-detective', 'C:\\GIT\\test-detective']), ['Read(//c/GIT/test-detective/**)', 'Read(//c/git/test-detective/**)']);
+    assert.deepEqual(evalDenyRules(['C:\\git\\test-detective']), ['Read(//c/git/test-detective/**)'], 'an all-lower-case root gets one rule');
+    // POSIX file systems are case-sensitive: no extra spelling.
+    if (process.platform !== 'win32') assert.deepEqual(evalDenyRules(['/home/me/Repo']), ['Read(//home/me/Repo/**)']);
+  });
+});
+
+describe('protected roots (R4b)', () => {
+  const tempClaude = path.join(tmpdir(), 'claude');
+  // A deny rule `Read(//x/**)` covers every path whose rule spelling starts with `//x/`. Compared
+  // case-insensitively here, so the check errs toward "denied".
+  const deniedBy = (rules: string[], absolute: string) => rules.find((r) => (rulePath(absolute) + '/').toLowerCase().startsWith(r.slice('Read('.length, -'**)'.length).toLowerCase()));
+
+  test('projectSlug replaces every character other than a letter or digit, as Claude Code names its project folders', () => {
+    assert.equal(projectSlug('C:\\git\\test-detective'), 'C--git-test-detective');
+    assert.equal(projectSlug('C:\\GIT\\test-detective'), 'C--GIT-test-detective');
+    assert.equal(projectSlug('/home/me/my repo.v2'), '-home-me-my-repo-v2');
+  });
+
+  test('cover the repo as given and as spelled on disk, ~/.claude, and this repo\'s Claude Code temp folders', () => {
+    const roots = defaultProtectedRoots(REPO_ROOT);
+    const spellings = [...new Set([path.resolve(REPO_ROOT), realpathSync.native(REPO_ROOT)])];
+    const onDisk = (p: string) => (existsSync(p) ? realpathSync.native(p) : p);
+    const temp = spellings.flatMap((s) => [path.join(tempClaude, projectSlug(s)), onDisk(path.join(tempClaude, projectSlug(s)))]);
+    assert.deepEqual(roots, [...new Set([...spellings, path.join(homedir(), '.claude'), ...temp])]);
+    assert.equal(new Set(roots).size, roots.length, 'no duplicate roots');
+    // A path that doesn't exist falls back to its resolved spelling.
+    const missing = path.join(tmpdir(), 'td-no-such-repo', 'X');
+    assert.deepEqual(defaultProtectedRoots(missing), [missing, path.join(homedir(), '.claude'), path.join(tempClaude, projectSlug(missing))]);
+  });
+
+  // os.tmpdir() reads TEMP/TMP (Windows) or TMPDIR at each call, so a test directory can stand in for it.
+  test('an existing temp folder is protected under its on-disk spelling, whatever casing the repo path has', { skip: process.platform !== 'win32' && 'case-insensitive file systems only' }, async (t) => {
+    const fakeTmp = realpathSync.native(await tempDir(t, 'td-tmp-'));
+    const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
+    t.after(() => {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    });
+    process.env.TEMP = process.env.TMP = process.env.TMPDIR = fakeTmp;
+    // Created by a session started from C:\fake\repo-name; the evaluation runs from C:\FAKE\Repo-Name.
+    const existing = path.join(fakeTmp, 'claude', 'C--fake-repo-name');
+    await mkdir(existing, { recursive: true });
+    const roots = defaultProtectedRoots('C:\\FAKE\\Repo-Name');
+    assert.ok(roots.includes(path.join(fakeTmp, 'claude', 'C--FAKE-Repo-Name')), 'the derived spelling');
+    assert.ok(roots.includes(existing), 'the on-disk spelling of the existing folder');
+    assert.ok(evalDenyRules(roots).includes(`Read(${rulePath(existing)}/**)`), 'a rule that spells the existing folder exactly');
+  });
+
+  test('never cover a workspace, its files, or the evaluation session\'s own Claude Code temp folder', async (t) => {
+    const ctx = await context(t);
+    const roots = defaultProtectedRoots(REPO_ROOT);
+    const rules = evalDenyRules(roots);
+    // The live default parent (os.tmpdir()) and the session's own temp folder, named after its cwd.
+    const live = path.join(tmpdir(), 'ws-AbC123', 'project');
+    for (const p of [live, path.join(live, 'artifacts', 'results.json'), path.join(tempClaude, projectSlug(live)), ctx.workspace.root, ...ctx.workspace.files.map((f) => path.join(ctx.workspace.root, ...f.path.split('/')))]) {
+      assert.equal(deniedBy(rules, p), undefined, `${p} must stay readable`);
+      assert.ok(!roots.some((r) => isInside(r, p)), `${p} is inside a protected root`);
+    }
+    for (const p of [path.join(REPO_ROOT, 'evals', 'runs'), path.join(tempClaude, projectSlug(REPO_ROOT), 'session', 'scratchpad', 'copy.json'), path.join(homedir(), '.claude', 'projects')]) {
+      assert.ok(deniedBy(rules, p), `${p} must be denied`);
+    }
+  });
+
+  // The live default parent is os.tmpdir(); nothing is created in the real temp scratch, so the
+  // scratch-shaped folder here is built under a test directory.
+  test('a workspace container inside a protected Claude Code temp folder is refused', async (t) => {
+    const { snapshot } = await fakeSnapshot(t);
+    const parent = await tempDir(t, 'td-parent-');
+    const scratch = path.join(parent, 'claude', projectSlug(REPO_ROOT));
+    await mkdir(scratch, { recursive: true });
+    await assert.rejects(createWorkspace(snapshot, { repoRoot: REPO_ROOT, parent: scratch, protectedRoots: [REPO_ROOT, scratch] }, markers), /inside protected path/);
+  });
+
+  test('the audit flags protected paths under any casing, separator or relative route, and the temp scratch', async (t) => {
+    const ctx = await context(t);
+    const scratch = path.join(tempClaude, projectSlug(REPO_ROOT), 'session', 'scratchpad');
+    const toRepo = path.relative(ctx.workspace.root, path.join(REPO_ROOT, 'evals', 'runs', 'r', 'score.json'));
+    // Alternating case (c:\GiT\TeSt-...): no deny rule spells it, the audit still matches it on Windows.
+    const mixed = process.platform === 'win32' ? [...REPO_ROOT].map((c, i) => (i % 2 ? c.toUpperCase() : c.toLowerCase())).join('') : REPO_ROOT;
+    const audit = auditTranscript(
+      [
+        toolUse('a', 'Read', { file_path: path.join(mixed, 'evals', 'runs', 'r', 'score.json') }),
+        toolUse('b', 'Read', { file_path: path.join(REPO_ROOT, 'evals', 'runs').replaceAll('\\', '/') }),
+        toolUse('c', 'Read', { file_path: toRepo }),
+        toolUse('d', 'Grep', { pattern: 'x', path: scratch }),
+        toolUse('e', 'Glob', { pattern: `${scratch.replaceAll('\\', '/')}/**/score.json` }),
+        toolUse('f', 'Bash', { command: `ls "${scratch}"` }),
+      ],
+      ctx,
+      markers,
+    );
+    assert.deepEqual(audit.leaks.map((l) => [l.kind, l.tool]), ['Read', 'Read', 'Read', 'Grep', 'Glob', 'Bash'].map((tool) => ['protected-path', tool]));
+  });
+
+  test('the audit leaves workspace evidence alone, and sees an 8.3 short name only as outside the workspace unless its alias is a recorded root', async (t) => {
+    const ctx = await context(t);
+    const audit = auditTranscript(
+      [
+        toolUse('a', 'Read', { file_path: 'artifacts/results.json' }),
+        toolUse('b', 'Read', { file_path: path.join(ctx.workspace.root, 'tests', 'ui', 'login.spec.ts') }),
+        toolUse('c', 'Glob', { pattern: 'test-results/**/*.png' }),
+        // An 8.3 short name of the repo (C:\GIT\TEST-D~1) is not resolvable from the transcript.
+        toolUse('d', 'Read', { file_path: path.join(path.dirname(REPO_ROOT), 'TEST-D~1', 'evals', 'runs') }),
+      ],
+      ctx,
+      markers,
+    );
+    assert.deepEqual(audit.leaks, []);
+    assert.deepEqual(audit.warnings.map((w) => [w.kind, w.tool]), [['outside-workspace', 'Read']]);
+  });
+});
+
+describe('8.3 short-name aliases of protected roots (R4b Step 1C)', () => {
+  // Answers like GetShortPathName: each component replaced by its short name, null below `missing`.
+  function lookup(shorts: Record<string, string>, missing: string[] = []) {
+    const calls: string[][] = [];
+    const fn: ShortPathLookup = async (paths) => {
+      calls.push(paths);
+      return paths.map((p) => (missing.some((m) => p.toLowerCase().startsWith(m.toLowerCase())) ? null : p.split('\\').map((c) => shorts[c] ?? c).join('\\')));
+    };
+    return Object.assign(fn, { calls });
+  }
+  const deniedBy = (rules: string[], absolute: string) => rules.find((r) => (rulePath(absolute) + '/').toLowerCase().startsWith(r.slice('Read('.length, -'**)'.length).toLowerCase()));
+
+  test('adds the short name of the protected directory itself, with one lookup of every ancestor', async () => {
+    const shorts = lookup({ 'protected-answers': 'PROTEC~1' });
+    assert.deepEqual(await withShortNameAliases(['C:\\Work\\protected-answers'], shorts), ['C:\\Work\\protected-answers', 'C:\\Work\\PROTEC~1']);
+    assert.deepEqual(shorts.calls, [['C:\\Work', 'C:\\Work\\protected-answers']]);
+  });
+
+  test('adds the short name of an ancestor, not only of the last component', async () => {
+    assert.deepEqual(await withShortNameAliases(['C:\\long-parent-folder\\keys'], lookup({ 'long-parent-folder': 'LONG-P~1' })), ['C:\\long-parent-folder\\keys', 'C:\\LONG-P~1\\keys']);
+  });
+
+  test('several short components give every long/short combination, mixed ones included', async () => {
+    const root = 'C:\\td-alias-x1\\long-parent-directory\\protected-child-dir';
+    const roots = await withShortNameAliases([root], lookup({ 'td-alias-x1': 'TD-ALI~1', 'long-parent-directory': 'LONG-P~1', 'protected-child-dir': 'PROTEC~1' }));
+    assert.equal(roots.length, 8);
+    assert.equal(new Set(roots.map((r) => r.toLowerCase())).size, 8);
+    for (const mixed of ['C:\\TD-ALI~1\\long-parent-directory\\PROTEC~1', 'C:\\td-alias-x1\\LONG-P~1\\protected-child-dir', 'C:\\TD-ALI~1\\LONG-P~1\\PROTEC~1']) assert.ok(roots.includes(mixed), mixed);
+    const rules = evalDenyRules(roots);
+    for (const r of roots) assert.ok(deniedBy(rules, path.win32.join(r, 'truth.json')), `${r} is denied`);
+  });
+
+  test('handles spaces, and rule paths keep them', async () => {
+    const roots = await withShortNameAliases(['C:\\a dir with spaces\\keys'], lookup({ 'a dir with spaces': 'ADIRWI~1' }));
+    assert.deepEqual(roots, ['C:\\a dir with spaces\\keys', 'C:\\ADIRWI~1\\keys']);
+    assert.ok(evalDenyRules(roots).includes('Read(//c/a dir with spaces/keys/**)'));
+    assert.ok(evalDenyRules(roots).includes('Read(//c/ADIRWI~1/keys/**)'));
+  });
+
+  test('adds nothing when no component has a short name, and never looks up non-drive paths', async () => {
+    assert.deepEqual(await withShortNameAliases(['C:\\abc\\def'], lookup({})), ['C:\\abc\\def']);
+    const none = lookup({});
+    assert.deepEqual(await withShortNameAliases(['/home/me/repo', 'C:\\'], none), ['/home/me/repo', 'C:\\']);
+    assert.deepEqual(none.calls, [], 'no lookup without a drive path below the root');
+  });
+
+  test('a root that does not exist yet still gets the short names of its existing ancestors', async () => {
+    const roots = await withShortNameAliases(['C:\\existing-parent\\not-yet-created'], lookup({ 'existing-parent': 'EXISTI~1' }, ['C:\\existing-parent\\not-yet-created']));
+    assert.deepEqual(roots, ['C:\\existing-parent\\not-yet-created', 'C:\\EXISTI~1\\not-yet-created']);
+  });
+
+  test('fails closed when the lookup fails or answers something it cannot have meant', async () => {
+    const root = 'C:\\Work\\protected-answers';
+    await assert.rejects(withShortNameAliases([root], async () => { throw new Error('powershell failed'); }), /powershell failed/);
+    const answers: [string, (string | null)[] | unknown][] = [
+      ['too few answers', ['C:\\Work']],
+      ['not an array', 'C:\\Work'],
+      ['a non-string answer', ['C:\\Work', 42]],
+      ['another drive', ['D:\\Work', 'D:\\Work\\PROTEC~1']],
+      ['another depth', ['C:\\Work', 'C:\\Work\\PROTEC~1\\x']],
+      ['a component that is no 8.3 name', ['C:\\Work', 'C:\\Work\\not a short name']],
+      ['an ancestor that disagrees with its child', ['C:\\WORK~1', 'C:\\Work\\PROTEC~1']],
+      ['a child that exists below a missing ancestor', [null, 'C:\\Work\\PROTEC~1']],
+    ];
+    for (const [label, answer] of answers) {
+      await assert.rejects(withShortNameAliases([root], async () => answer as (string | null)[]), /Short path lookup/, label);
+    }
+  });
+
+  test(`fails closed beyond ${MAX_ROOT_SPELLINGS} spellings of one root`, async () => {
+    const parts = ['component-one', 'component-two', 'component-three', 'component-four', 'component-five', 'component-six', 'component-seven'];
+    const shorts = Object.fromEntries(parts.map((p, i) => [p, `COMPON~${i + 1}`]));
+    await assert.rejects(withShortNameAliases([`C:\\${parts.join('\\')}`], lookup(shorts)), /More than 64 short-name spellings/);
+    assert.equal((await withShortNameAliases([`C:\\${parts.slice(0, 6).join('\\')}`], lookup(shorts))).length, 64);
+  });
+
+  test('spellings shared by several roots, or differing only in case, are added once', async () => {
+    const roots = await withShortNameAliases(['C:\\GIT\\test-detective', 'C:\\git\\test-detective', 'C:\\GIT\\TEST-D~1'], lookup({ 'test-detective': 'TEST-D~1' }));
+    assert.deepEqual(roots, ['C:\\GIT\\test-detective', 'C:\\git\\test-detective', 'C:\\GIT\\TEST-D~1']);
+    const rules = evalDenyRules(roots);
+    assert.equal(new Set(rules).size, rules.length);
+  });
+
+  test('the real default roots with their short names never cover the workspace or the session temp folder', async (t) => {
+    const ctx = await context(t);
+    const shorts = lookup({ 'test-detective': 'TEST-D~1', '.claude': 'CLAUDE~1', [projectSlug(REPO_ROOT)]: 'C--GIT~1', 'AppData': 'APPDAT~1' });
+    const roots = await withShortNameAliases(defaultProtectedRoots(REPO_ROOT), shorts);
+    const rules = evalDenyRules(roots);
+    const live = path.join(tmpdir(), 'ws-AbC123', 'project');
+    for (const p of [live, path.join(tmpdir(), 'claude', projectSlug(live)), ctx.workspace.root, ...ctx.workspace.files.map((f) => path.join(ctx.workspace.root, ...f.path.split('/')))]) {
+      assert.equal(deniedBy(rules, p), undefined, `${p} must stay readable`);
+    }
+    if (process.platform === 'win32') {
+      assert.ok(deniedBy(rules, path.join(path.dirname(REPO_ROOT), 'TEST-D~1', 'evals', 'runs')), 'the repo by its short name');
+      assert.ok(deniedBy(rules, path.join(homedir(), 'CLAUDE~1', 'projects')), '~/.claude by its short name');
+    }
+  });
+
+  test('the audit recognizes a protected root under its recorded short name', async (t) => {
+    const { snapshot } = await fakeSnapshot(t);
+    const parent = await tempDir(t, 'td-parent-');
+    const shortRepo = path.join(path.dirname(REPO_ROOT), 'TEST-D~1');
+    const workspace = await createWorkspace(snapshot, { repoRoot: REPO_ROOT, parent, protectedRoots: [REPO_ROOT, shortRepo] }, markers);
+    t.after(() => removeWorkspace(workspace));
+    const audit = auditTranscript(
+      [
+        toolUse('a', 'Read', { file_path: path.join(shortRepo, 'evals', 'runs') }),
+        toolUse('b', 'Grep', { pattern: 'x', path: shortRepo.toLowerCase() }),
+        toolUse('c', 'Read', { file_path: 'artifacts/results.json' }),
+      ],
+      { workspace },
+      markers,
+    );
+    assert.deepEqual(audit.leaks.map((l) => [l.kind, l.tool]), [['protected-path', 'Read'], ['protected-path', 'Grep']]);
   });
 });
 
@@ -79,6 +320,8 @@ describe('session options', () => {
     const after = settings(evaluation).permissions.deny;
     assert.deepEqual(after.slice(0, before.length), before, 'production deny rules kept, in order');
     assert.deepEqual(after.slice(before.length), evalDenyRules(ctx.workspace.protectedRoots), 'only Read deny rules added');
+    assert.ok(after.slice(before.length).every((r) => r.startsWith('Read(')), 'every added rule is a Read deny rule');
+    assert.ok(after.includes(`Read(${rulePath(path.join(tmpdir(), 'claude', projectSlug(REPO_ROOT)))}/**)`), "this repo's Claude Code temp folder is denied");
     assert.equal(settings(evaluation).autoMemoryEnabled, false);
     assert.equal(settings(evaluation).disableSkillShellExecution, true);
   });

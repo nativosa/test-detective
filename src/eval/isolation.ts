@@ -58,12 +58,25 @@ export function rulePath(absolute: string): string {
   return `/${absolute.replace(/\/+$/, '')}`;
 }
 
-/** Read deny rules for the protected roots (the repo, ~/.claude). Read rules also apply to Grep and Glob. */
+/**
+ * Read deny rules for the protected roots (workspace.ts defaultProtectedRoots). Read rules also apply
+ * to Grep and Glob. A Windows path is also denied in all lower case: the file system ignores case.
+ * (The first live probe saw an upper-case spelling denied without a rule spelling it, so the rule
+ * matching appears to ignore case too; the lower-case rules are kept.) 8.3 short names are covered
+ * only as separate roots: the live adapter adds every short spelling (workspace.ts
+ * withShortNameAliases), because a short-name Read bypassed the long-name rules in that probe.
+ * Duplicates are dropped, first occurrence kept.
+ */
 export function evalDenyRules(protectedRoots: string[]): string[] {
-  const rules = protectedRoots.map((root) => `Read(${rulePath(path.resolve(root))}/**)`);
+  const rules = new Set<string>();
+  for (const root of protectedRoots) {
+    const rule = rulePath(path.resolve(root));
+    rules.add(`Read(${rule}/**)`);
+    if (/^\/\/[a-z]\//.test(rule)) rules.add(`Read(${rule.toLowerCase()}/**)`);
+  }
   const claudeHome = path.join(homedir(), '.claude');
-  if (protectedRoots.some((r) => path.resolve(r) === claudeHome)) rules.push('Read(~/.claude/**)');
-  return rules;
+  if (protectedRoots.some((r) => path.resolve(r) === claudeHome)) rules.add('Read(~/.claude/**)');
+  return [...rules];
 }
 
 /**

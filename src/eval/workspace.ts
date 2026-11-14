@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { cp, lstat, mkdtemp, readdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -51,8 +52,119 @@ export type LeakMarkers = { canaries: string[]; strings: string[] };
 
 export type AuditResult = { ok: boolean; problems: string[]; notes: string[] };
 
+/**
+ * The paths a workspace must stay out of and an evaluation session must not read:
+ * - the repo, as given and as spelled on disk (Windows paths are case-insensitive, and Node keeps
+ *   the casing of the cwd it was started from, so both C:\git\x and C:\GIT\x occur);
+ * - ~/.claude (memory, plans and transcripts of earlier sessions);
+ * - Claude Code's temporary folders of sessions in this repo, <tmpdir>/claude/<project slug>: their
+ *   scratchpads and tool outputs held copies of truth files and saved scores (R4b). Only this repo's
+ *   slugs are protected; an evaluation session's own folder there (named after its workspace) is not.
+ *   The folder is named after the cwd a session was started from, so an existing one is also
+ *   protected under its on-disk spelling (C--git-… is found from C:\GIT\… as well).
+ */
 export function defaultProtectedRoots(repoRoot: string): string[] {
-  return [path.resolve(repoRoot), path.join(homedir(), '.claude')];
+  const spellings = [...new Set([path.resolve(repoRoot), onDisk(repoRoot)])];
+  const sessionTemp = spellings.flatMap((s) => {
+    const folder = path.join(tmpdir(), 'claude', projectSlug(s));
+    return [folder, onDisk(folder)];
+  });
+  return [...new Set([...spellings, path.join(homedir(), '.claude'), ...sessionTemp])];
+}
+
+/** Claude Code's folder name for a project path: every character other than a letter or digit becomes "-". */
+export function projectSlug(projectPath: string): string {
+  return projectPath.replace(/[^A-Za-z0-9]/g, '-');
+}
+
+/** The path as spelled on disk (realpath.native), or as resolved when it doesn't exist. */
+function onDisk(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/**
+ * Full Windows short (8.3) paths for absolute drive paths, in order: null for a path that doesn't
+ * exist, the path itself where no component has a short name. Throws when the lookup fails.
+ */
+export type ShortPathLookup = (paths: string[]) => Promise<(string | null)[]>;
+
+/** Spellings allowed per protected root; each component with a short name doubles them. More fails closed. */
+export const MAX_ROOT_SPELLINGS = 64;
+
+const DRIVE_PATH = /^([A-Za-z]:)\\(.*)$/;
+/** An 8.3 name as Windows generates it: no spaces, dots or path characters in the base name. */
+const SHORT_NAME = /^[A-Za-z0-9!#$%&'()@^_`{}~-]{1,8}(\.[A-Za-z0-9!#$%&'()@^_`{}~-]{1,3})?$/;
+
+/**
+ * The protected roots plus every 8.3 spelling of them (R4b). A Read through a short name
+ * (C:\GIT\TEST-D~1\…) bypassed deny rules spelled with long names in the first live probe. Any
+ * component with a short name can be spelled either way, ancestors included, so each root gets all
+ * long/short combinations of its components, looked up once at setup. The lookup runs in the live
+ * adapter; this function only validates and combines its answers. Fails closed (throws) on a
+ * malformed answer or more than MAX_ROOT_SPELLINGS spellings for one root.
+ *
+ * Covered: short names that exist at setup. Not covered (no finite list): junctions such as
+ * "Local Settings" or "Application Data", symlinks, UNC and \\?\ / \\.\ device paths, and short
+ * names created after setup, including that of a root that doesn't exist yet (its existing
+ * ancestors' short names are still covered).
+ */
+export async function withShortNameAliases(roots: string[], lookup: ShortPathLookup): Promise<string[]> {
+  const parsed = roots.flatMap((root) => {
+    const match = DRIVE_PATH.exec(path.win32.normalize(root));
+    const parts = match ? match[2]!.split('\\').filter(Boolean) : [];
+    return match && parts.length > 0 ? [{ drive: match[1]!.toUpperCase(), parts }] : [];
+  });
+  const prefixes = [...new Set(parsed.flatMap(({ drive, parts }) => parts.map((_, i) => [drive, ...parts.slice(0, i + 1)].join('\\'))))];
+  const answers = prefixes.length === 0 ? [] : await lookup(prefixes);
+  if (!Array.isArray(answers) || answers.length !== prefixes.length) throw new Error(`Short path lookup returned ${Array.isArray(answers) ? answers.length : typeof answers} answer(s) for ${prefixes.length} path(s).`);
+  const shortOf = new Map<string, string | null>();
+  prefixes.forEach((prefix, i) => shortOf.set(prefix, checkedShortPath(prefix, answers[i])));
+
+  const seen = new Set(roots.map((r) => path.win32.normalize(r).toLowerCase()));
+  const aliases: string[] = [];
+  for (const { drive, parts } of parsed) {
+    let spellings = [drive];
+    let previousShort: string | null = drive;
+    for (let i = 0; i < parts.length; i++) {
+      const short = shortOf.get([drive, ...parts.slice(0, i + 1)].join('\\')) ?? null;
+      // Each answer must extend the previous one by exactly one component.
+      if (short !== null && (previousShort === null || short.slice(0, previousShort.length + 1).toLowerCase() !== `${previousShort}\\`.toLowerCase())) {
+        throw new Error(`Short path lookup returned an inconsistent answer for ${[drive, ...parts.slice(0, i + 1)].join('\\')}.`);
+      }
+      const names = [parts[i]!];
+      if (short !== null && path.win32.basename(short).toLowerCase() !== parts[i]!.toLowerCase()) names.push(path.win32.basename(short));
+      spellings = spellings.flatMap((s) => names.map((n) => `${s}\\${n}`));
+      if (spellings.length > MAX_ROOT_SPELLINGS) throw new Error(`More than ${MAX_ROOT_SPELLINGS} short-name spellings of ${[drive, ...parts].join('\\')}; refusing to start.`);
+      previousShort = short;
+    }
+    for (const s of spellings) {
+      if (seen.has(s.toLowerCase())) continue;
+      seen.add(s.toLowerCase());
+      aliases.push(s);
+    }
+  }
+  return [...roots, ...aliases];
+}
+
+/** One lookup answer, validated: same drive and depth, every differing component a valid 8.3 name. */
+function checkedShortPath(longPath: string, answer: unknown): string | null {
+  if (answer === null) return null;
+  const fail = () => new Error(`Short path lookup returned an invalid answer for ${longPath}.`);
+  if (typeof answer !== 'string') throw fail();
+  const match = DRIVE_PATH.exec(answer);
+  const long = DRIVE_PATH.exec(longPath)!;
+  if (!match || match[1]!.toUpperCase() !== long[1]!.toUpperCase()) throw fail();
+  const shortParts = match[2]!.split('\\');
+  const longParts = long[2]!.split('\\');
+  if (shortParts.length !== longParts.length) throw fail();
+  shortParts.forEach((s, i) => {
+    if (s.toLowerCase() !== longParts[i]!.toLowerCase() && !SHORT_NAME.test(s)) throw fail();
+  });
+  return `${match[1]!.toUpperCase()}\\${match[2]}`;
 }
 
 /**

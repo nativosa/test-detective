@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { existsSync, realpathSync } from 'node:fs';
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
 import type { TestContext } from 'node:test';
@@ -10,12 +11,14 @@ import type { CliArgs } from '../../agent/args.ts';
 import type { QueryFn } from '../../agent/run.ts';
 import { args } from '../../agent/test/helpers.ts';
 import { SERVER_VERSION } from '../../mcp/server.ts';
-import { EVAL_MAX_BUDGET_USD, LiveRefusal, parseLiveArgs, runLiveEvaluation } from '../live.ts';
+import { rulePath } from '../isolation.ts';
+import { EVAL_MAX_BUDGET_USD, LiveRefusal, parseLiveArgs, runLiveEvaluation, windowsShortPaths } from '../live.ts';
 import type { LiveDeps, LiveResult } from '../live.ts';
 import { loadRunManifest, OUTCOME_FILE, RESULT_FILE, RunOutcome, SCORE_FILE, ScoreConflictError, scoreRun, SUMMARY_JSON, SUMMARY_MD, TRANSCRIPT_FILE } from '../runs.ts';
 import { SCENARIOS_DIR } from '../scenarios.ts';
 import { sha256 } from '../snapshots.ts';
-import { CONFIG_FILES } from '../workspace.ts';
+import { CONFIG_FILES, withShortNameAliases } from '../workspace.ts';
+import type { ShortPathLookup } from '../workspace.ts';
 import { goldenSnapshot, REPO_ROOT, VARIANTS, variantQuery, writeRunManifest } from './golden.ts';
 import type { Variant } from './golden.ts';
 
@@ -48,6 +51,8 @@ async function setup(t: TestContext, overrides: Partial<LiveDeps> & { variant?: 
     repoState: async () => 'unchanged',
     sdkVersion: '0.3.302',
     now: () => new Date('2026-10-21T12:00:00.000Z'),
+    // No short names, so tests don't depend on the volume's 8.3 setting (the real lookup is tested below).
+    shortPaths: async (paths) => paths,
     ...rest,
   };
   await mkdir(workParent, { recursive: true });
@@ -290,6 +295,76 @@ describe('integrity', () => {
     const { records } = await scoreRun(r.runDir, { snapshotsRoot: s.deps.snapshotsRoot, scenariosRoot, rescore: true });
     assert.equal(records[0]!.category, 'invalid_setup');
     assert.match(records[0]!.setup.problems.join(' '), /ground truth changed since the run \(captured [0-9a-f]{12}/);
+  });
+});
+
+describe('8.3 short-name protection at setup (R4b Step 1C)', () => {
+  test('the protected roots gain their short spellings, recorded in the outcome and denied in the session', async (t) => {
+    const shortPaths: ShortPathLookup = async (paths) => paths.map((p) => p.replace(/\\test-detective$/i, '\\TEST-D~1').replace(/\\\.claude$/i, '\\CLAUDE~1'));
+    const s = await setup(t, { shortPaths });
+    const r = await runLiveEvaluation(request(), s.deps);
+    assert.equal(s.calls.n, 1);
+    const { outcome } = await saved(r);
+    const roots = outcome.workspace!.protectedRoots;
+    const shortRepo = `${path.dirname(REPO_ROOT).replace(/^[a-z]:/, (d) => d.toUpperCase())}\\TEST-D~1`;
+    assert.ok(roots.some((root) => root.toLowerCase() === shortRepo.toLowerCase()), 'the repo by its short name');
+    assert.ok(roots.some((root) => root.toLowerCase() === path.join(homedir(), 'CLAUDE~1').toLowerCase()), '~/.claude by its short name');
+    const deny = (outcome.preflight.session as { settings: { permissions: { deny: string[] } } }).settings.permissions.deny;
+    assert.ok(deny.some((rule) => rule.toLowerCase() === `read(${rulePath(shortRepo).toLowerCase()}/**)`), 'a deny rule spells the short repo path');
+    assert.equal(r.score?.category, 'scored', r.score?.reasons.join('; '));
+    assert.deepEqual(await leftovers(s.workParent), []);
+  });
+
+  test('a failed or malformed lookup fails closed before any workspace or session', async (t) => {
+    const failures: ShortPathLookup[] = [
+      async () => {
+        throw new Error('powershell.exe not found');
+      },
+      async (paths) => paths.slice(1),
+      async (paths) => paths.map((p) => p.replace(/^C:/i, 'D:')),
+    ];
+    for (const shortPaths of failures) {
+      const s = await setup(t, { shortPaths });
+      const r = await runLiveEvaluation(request(), s.deps);
+      assert.equal(s.calls.n, 0, 'no session');
+      assert.equal(r.outcome.harness.status, 'setup_failed');
+      assert.match(r.outcome.harness.detail!, /powershell\.exe not found|Short path lookup/);
+      assert.equal(r.outcome.workspace, null);
+      assert.deepEqual(await leftovers(s.workParent), [], 'no workspace created');
+    }
+  });
+
+  test('the real lookup refuses anything but absolute drive paths, and needs no process for none', async () => {
+    assert.deepEqual(await windowsShortPaths([]), []);
+    if (process.platform !== 'win32') return;
+    for (const bad of ['relative\\dir', '\\\\localhost\\C$\\x', 'C:\\x\ny', '/c/x']) await assert.rejects(windowsShortPaths([bad]), /refuses/, bad);
+  });
+
+  test('the real lookup finds the short names of ancestors and of names with spaces or non-ASCII letters', { skip: process.platform !== 'win32' && 'Windows only' }, async (t) => {
+    const dir = realpathSync.native(await mkdtemp(path.join(tmpdir(), 'td-short-')));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const deep = path.join(dir, 'long-parent-directory', 'protected-child-dir');
+    const spaced = path.join(dir, 'a dir with spaces', 'keys');
+    const accented = path.join(dir, 'dossier-protégé-réponses');
+    for (const d of [deep, spaced, accented]) await mkdir(d, { recursive: true });
+    const missing = path.join(dir, 'not-created-yet');
+    const answers = await windowsShortPaths([deep, spaced, accented, missing]);
+    assert.equal(answers[3], null, 'a missing path has no answer');
+    for (const [i, long] of [deep, spaced, accented].entries()) {
+      assert.ok(answers[i], `${long} has an answer`);
+      assert.equal(realpathSync.native(answers[i]!), long, 'the answer is the same directory');
+    }
+    const roots = await withShortNameAliases([deep, spaced, accented, missing], windowsShortPaths);
+    for (const alias of roots) assert.ok(existsSync(alias) || alias.toLowerCase().endsWith('\\not-created-yet'), `${alias} exists`);
+    for (const alias of roots.filter((a) => existsSync(a))) {
+      assert.ok([deep, spaced, accented].includes(realpathSync.native(alias)), `${alias} is one of the roots`);
+    }
+    // 8.3 names can be turned off per volume; where the deep path has one, every mix of its components is a root.
+    if (answers[0]!.toLowerCase() !== deep.toLowerCase()) {
+      const shortComponents = answers[0]!.split('\\').filter((c, i) => c.toLowerCase() !== deep.split('\\')[i]!.toLowerCase()).length;
+      assert.equal(roots.filter((a) => existsSync(a) && realpathSync.native(a) === deep).length, 2 ** shortComponents);
+      assert.ok(roots.includes(answers[0]!.replace(/^[a-z]:/, (d) => d.toUpperCase())), 'the all-short spelling');
+    }
   });
 });
 
