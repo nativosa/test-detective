@@ -290,6 +290,137 @@ The investigating agent must not see `truth.json`, these docs, eval code, or the
 
 A clean audit means no leak was observed, not that none happened.
 
+### OS-enforced sandbox (R4b Step 1D, foundation only; not active)
+
+The planned R4 boundary: the investigator's Claude Code process (with its tools and the MCP server) runs as a dedicated standard Windows account, `td-eval`, and Windows checks every file access whatever the path spelling. The trusted host keeps the SDK, the truths, the canaries, the transcript and scoring. Steps 1D.1 and 1D.1B (security corrections after the 1D.1A audit) add the offline pieces only. **No account exists, no ACL was changed, nothing is wired into `live.ts`, and no check has run under another identity.**
+
+**Status: offline foundation only.**
+- OS-level isolation is not active and not verified.
+- Cross-account process launching, real ACL enforcement and the account's authentication are untested.
+- Live R4 evaluation stays blocked until Step 1D.2 has set up the account and `check --account` has passed.
+- The `C:\GIT`-wide deny below is provisional: its scope needs explicit approval before `-Apply`.
+- Shadow copies (elevated `vssadmin list shadows`) must be reviewed before any real ACL change, because a copy taken before the deny keeps the old, readable ACL.
+
+- **Setup (`scripts/eval-sandbox/setup.ps1`; decisions in `src/eval/sandbox/setup-plan.ts`, run through the minimal entry point `setup-cli.ts`).**
+  - Without a switch it is read-only. It inventories:
+    - the account and the group;
+    - the deny root (the repo's top-level folder, here `C:\GIT`) and every item below it;
+    - the developer's profile, `~/.claude`, `%LOCALAPPDATA%` and TEMP;
+    - the sandbox folders and the staged runtime;
+    - its own journal.
+
+    Then it prints every planned change and the plan's SHA-256. `-InventoryOnly` prints the raw inventory.
+  - On this machine the plan explains why `C:\GIT` is open today: `BUILTIN\Users` ReadAndExecute and `Authenticated Users` Modify, both inherited from `C:\`. The fix is one explicit Deny FullControl ACE for the group `td-eval-sandbox`, inherited by everything below; no existing ACE changes.
+  - **The deny covers everything under `C:\GIT`, not only this repo.** The add-deny-ace description, and so the reviewed hash, names every top-level entry and the item count. A new repo, file or item changes the hash, and `-Apply` then refuses. On 2026-11-14 the scope was 55,911 items in 6 top-level entries (this repo, four other repos and one personal file).
+  - The plan also creates:
+    - the group;
+    - the standard user `td-eval`, a member of `Users` and the group only;
+    - `C:\td-eval` with protected ACLs. `runtime\` gets the group's ReadAndExecute; `work\` gets no group access.
+
+    Each folder is created with its security descriptor in one call (`Directory.CreateDirectory(path, DirectorySecurity)`), so it never exists with inherited permissions. The password is random, never displayed, and stored DPAPI-encrypted for the developer.
+  - **Fixed private files.** The credential (`eval-account.xml`), the journal (`eval-sandbox-state.json`) and the observed token (`eval-token.json`) always live in `%LOCALAPPDATA%\test-detective\`. No parameter can redirect them, and a link there is refused.
+  - **ACL verification is effective, not literal.** The scan groups every item below the deny root by its ACL "shape": folder or file, protected or not, an untrusted owner, and the ACEs of every non-trusted principal. Each item is counted in exactly one shape, so the analysis covers the whole tree with bounded output.
+    - After the deny exists, every inheriting shape must actually be denied: the first ACE for an identity of the account that decides read must be a deny, for the item and, on folders, for what it passes on. How Windows splits or flags the inherited copy doesn't matter.
+    - An incomplete scan never passes: unreadable items, too many distinct shapes or too many top-level entries.
+    - Explicit allows for any identity of the account, items it owns, and protected items are reported. The first two block.
+  - **Token.** The expected token SIDs include `Local account` and `NTLM Authentication`, but the list is not treated as exhaustive.
+    - `check --account` records the token it actually observed (`whoami /groups` as the account).
+    - `-Verify` fails until that token is present, belongs to the recorded account SID, holds the group and holds no Administrators.
+    - Read granted to an unclassified principal is reported until the token decides it.
+  - **It stops (exit 2) and takes nothing over** in these cases:
+    - a principal or folder exists that it didn't create (description marker with the run's nonce, plus the recorded SID);
+    - a user and a group share a name;
+    - an explicit allow for the account sits under the deny root;
+    - the scan is incomplete;
+    - a private root is readable by the account;
+    - the credential is missing or decrypts to another name;
+    - the account is an administrator;
+    - a recorded folder's ACL changed.
+  - **Journal and recovery.** Every change is written to the journal as *pending*, atomically (temporary file plus `File.Replace`), before it starts, and confirmed after it. A later run reconciles an interrupted change by exact identity only:
+    - a principal whose description carries the journaled nonce;
+    - the exact deny ACE;
+    - a folder with exactly the planned protected ACL.
+
+    Anything else is refused. An account whose credential wasn't stored is never adopted by `-Apply`; `-Remove` deletes it. An interrupted `-Remove` must be finished by `-Remove`.
+  - `-Apply` and `-Remove` need `-PlanSha256` of the reviewed plan, refuse when the plan changed, and run each change through `ShouldProcess`, so `-WhatIf` describes and changes nothing. Creating or deleting principals needs an elevated shell. The elevated planner imports only `setup-plan.ts`, `config.ts` and zod; the test pins that graph.
+  - `-Remove` deletes only what the journal records, while the SID and description still match. It is restartable: records of objects already gone are cleared. A deny ACE is removed only if it matches exactly, and folder removal is refused while the folder holds links.
+  - `-Verify` checks:
+    - the principals and the credential (its user name only);
+    - the deny ACE and its propagation;
+    - the folders' exact ACLs;
+    - the runtime's ACLs: every item inherits group read only, with no explicit ACEs, no write rights and trusted owners;
+    - the observed token;
+    - that nothing is pending.
+
+    It predicts what Windows enforces; `check --account` proves it, by attempting the forbidden reads as the account itself.
+  - It never touches shadow copies, security policy or other accounts.
+- **Launcher (`src/eval/sandbox/launcher.ts`, `scripts/eval-sandbox/launch-as.ps1`, `TdSandboxRelay.cs`, `runtime/stage2.mjs`).**
+  - The host starts Windows PowerShell with a minimal environment and one JSON request (no secret).
+  - `launch-as.ps1` re-validates the request:
+    - only `node.exe` from Program Files and `<root>\runtime\bin\stage2.mjs` may be started;
+    - the working directory must be a normalized path under `<root>\work\`, with no links;
+    - the credential path is fixed.
+
+    It loads the DPAPI credential, checks it names `COMPUTER\td-eval`, and starts the child through `CreateProcessWithLogonW` with the account's own profile environment.
+  - **`TdSandboxRelay.cs`** puts the child in a kill-on-close job object and checks it with `IsProcessInJob`; if either fails, the child is killed (exit 96). Only then does it write `TD-JOB-ASSIGNED` to the child's stdin and start relaying stdio.
+  - **`stage2.mjs` starts nothing until it reads that line.** That includes `whoami`, so no descendant can exist outside the job. The line is read byte by byte, so the target gets the rest of stdin unchanged. .NET Framework may write a UTF-8 BOM to the child's stdin first, when the console code page is UTF-8; stage2 consumes it.
+  - stage2 then reports its identity on stderr, refuses any other account, and starts only `claude.exe` or `probe.mjs`/`teardown.mjs` from the runtime. It passes only `CLAUDE_CODE_*`/SDK configuration variables, never auth variables.
+  - The host accepts the process only after the handshake shows the evaluation account (not the developer's name, SID or profile); otherwise it kills the launcher. A wrong identity is reported as such: the check counts it as a BLOCKER.
+  - `teardown.mjs` ends only processes whose full user name is the account's own. It refuses to end anything under another account, outside stage2, or under a token that contains Administrators.
+  - Only one sandbox session may run at a time (a lock in `%LOCALAPPDATA%\test-detective`), because teardown would end a concurrent session.
+  - Tested offline with same-user children only (`sandbox-relay.test.ts`, under `buildLaunch`'s real environment):
+    - the relay compiles;
+    - stdin reaches EOF, and stdout, stderr and the exit code are relayed;
+    - the job ends grandchildren, detached ones included, when the child exits or the launcher is killed;
+    - an unrelated process survives;
+    - relay → stage2 → target passes stdin byte for byte.
+- **Enforcement check (`src/eval/sandbox/check.ts`, `run-check.ts`, `runtime/probe.mjs`; `node src/eval/sandbox/main.ts check --self|--account`).**
+  - It uses disposable random sentinels in the workspace, under `<repo>\.work` and in TEMP.
+  - Each protected sentinel is read through these spellings:
+    - long and 8.3;
+    - forward slashes;
+    - `\\?\` and `\\.\`;
+    - `\\localhost\C$`, `\\127.0.0.1\C$` and `\\?\UNC\localhost\C$`;
+    - the default `Documents and Settings` and `Local Settings` junctions;
+    - a junction in the workspace.
+  - It also tries writes, listings (repo root, deny root, profile, TEMP root and the probe folders), the identity, the token, the profile and environment isolation, and the teardown.
+  - The probe reports only outcomes, error codes, hashes, entry counts and token group SIDs.
+  - Verdicts:
+    - **PASS** needs a complete, valid set of results:
+      - every forbidden attempt denied by Windows (`EACCES`/`EPERM`);
+      - the control read hash-correct;
+      - the evaluation identity, with the group in the token and no Administrators;
+      - a clean teardown.
+    - Any forbidden success is a **BLOCKER**, whatever else was reported.
+    - These are **INCONCLUSIVE**:
+      - a missing attempt;
+      - another error code (`ENOENT`, `UNKNOWN`, …);
+      - a failed control;
+      - a duplicated, unknown or malformed result;
+      - a probe report that is not exactly one valid JSON line.
+  - Attempt IDs are unique by construction: labels are checked before anything is created. This fixes the 1D.1A finding where two checks shared `temp-list` and one could mask the other.
+  - `--account` compares the staged runtime with a manifest built from the repo at that moment, never only with the manifest stored beside the copy.
+  - `--self` runs the probe as the developer in temp folders to test the machinery. It must end BLOCKER and proves nothing about isolation.
+- **Runtime copy (`src/eval/sandbox/runtime.ts`; `main.ts runtime-manifest [--stage]`).**
+  - An explicit allowlist:
+    - `src/mcp/*.ts`, plus a generated `package.json`;
+    - the lock-file closure of `@modelcontextprotocol/server`, `yauzl` and `zod`;
+    - the `claude.exe` package;
+    - the three sandbox scripts;
+    - `CONFIG_FILES`.
+  - It never includes `src/eval`, `evals/`, truth or generation files, saved results, transcripts, artifacts, credentials, `.git`, `.work` or other `.claude` files. Links are refused, and every file is scanned for `TDCANARY-`.
+  - The SHA-256 manifest is verified after staging (missing, changed and extra files). Currently 974 files, about 304 MB.
+  - `--stage` copies only into `<root>\runtime`. That folder must already exist, created by setup with its protected ACL, and must be a plain folder: staging never creates it.
+  - The "outside the repo" check resolves both paths first (`realpath`), so an 8.3 name or a junction that leads back into the repo is refused.
+
+**Assumptions only a real account can confirm:**
+- the profile environment and the pipe relay under `CreateProcessWithLogonW`;
+- the job assignment of a process the secondary-logon service created. The relay checks it with `IsProcessInJob`, and stage2 waits for the confirmation, but this is untested across identities;
+- that admin shares and loopback UNC paths are refused to a standard user;
+- that Windows propagates the deny to every inheriting item (verified structurally by `-Verify`, effectively by `check --account`);
+- whether Claude Code accepts a read-only workspace (fallback: grant Modify; the workspace integrity check still applies);
+- the separate Claude login in the account's profile.
+
 ## Live adapter (2.5.2c)
 
 ```sh
