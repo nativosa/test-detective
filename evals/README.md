@@ -401,6 +401,23 @@ The planned R4 boundary: the investigator's Claude Code process (with its tools 
   - Attempt IDs are unique by construction: labels are checked before anything is created. This fixes the 1D.1A finding where two checks shared `temp-list` and one could mask the other.
   - `--account` compares the staged runtime with a manifest built from the repo at that moment, never only with the manifest stored beside the copy.
   - `--self` runs the probe as the developer in temp folders to test the machinery. It must end BLOCKER and proves nothing about isolation.
+  - **Shadow copies (designed, not wired in yet; `shadow.ts`, `scripts/eval-sandbox/vss-inventory.ps1`).** A copy keeps the ACLs from when it was taken, so a copy from before the deny may still grant read. Three questions are kept apart:
+    - **A.** Does a copy contain the repo?
+    - **B.** Does it hold the earlier ACLs?
+    - **C.** Can the account read through it?
+
+    The elevated inventory answers A and B by reading only the existence and security descriptor of the repo folder and `package.json` in each copy (no listings, no file data, nothing changed). It prints one `TD-VSS-INVENTORY` JSON line (schema 2). C only the probe can answer: as the account, it reads `package.json` once through each inventoried device path that contains it, never through guessed device numbers, and reports only the SHA-256, which the host compares with the file's committed versions.
+    - **Completeness.** The inventory lists the copies twice, independently, through Win32_ShadowCopy and `vssadmin list shadows`, and is usable only when both agree on the same IDs.
+      - An empty inventory counts only when vssadmin itself reported "no items". A failed query stops the script, so it prints no inventory line.
+      - A copy belongs to the repo's volume by its volume GUID, not by its drive letter. An unresolved or contradictory volume is inconclusive.
+      - vssadmin prints localized text, so on a non-English system the agreement check fails, and that fails closed.
+    - **Freshness.** The inventory that plans the reads must be at most 30 minutes old when the probe starts. A second inventory, taken at most 30 minutes after the probe ends, must list exactly the same copies (ID, device, volume, creation time, contents found). Without it, the shadow part is INCONCLUSIVE, even with every read denied.
+
+    Verdicts:
+    - any read is a BLOCKER;
+    - a pass needs a Windows denial for every relevant copy and a confirmed unchanged copy set;
+    - INCONCLUSIVE, kept as separate categories: a not-found, invalid-device or unsupported error, a missing, duplicated, unknown or malformed result, an undecidable, duplicated or invalid inventory entry, and an incomplete, stale, foreign or unconfirmed inventory.
+    - A complete inventory with no copy of the repo's volume that contains the repo: nothing to attempt, which is reported separately from an inventory showing no copies at all.
 - **Runtime copy (`src/eval/sandbox/runtime.ts`; `main.ts runtime-manifest [--stage]`).**
   - An explicit allowlist:
     - `src/mcp/*.ts`, plus a generated `package.json`;

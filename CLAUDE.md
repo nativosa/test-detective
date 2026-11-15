@@ -139,7 +139,8 @@ Registered in `.mcp.json` as `test-detective` (stdio, `node src/mcp/main.ts --en
   - the credential, journal and token files have fixed names in `%LOCALAPPDATA%\test-detective`;
   - check attempt IDs are unique, and a duplicated, unknown or malformed result is never a pass;
   - `stage2.mjs` starts nothing before the relay's `TD-JOB-ASSIGNED` line;
-  - `check --account` verifies the runtime against a manifest built from the repo.
+  - `check --account` verifies the runtime against a manifest built from the repo;
+  - shadow-copy checks (`shadow.ts`) attempt only the public control file `package.json` through device paths from the elevated inventory (`vss-inventory.ps1`, read-only), any read is a BLOCKER, and only a Windows denial for every relevant copy, from a complete inventory (Win32_ShadowCopy and vssadmin agree) confirmed unchanged by a second inventory after the probe, passes. Never read a shadow copy from the host or an elevated helper, and never delete or change shadow copies or System Restore.
 
   Scripts under `scripts/eval-sandbox/runtime/` run as the evaluation account: Node built-ins only, never repo imports. Never add `src/eval`, `evals/`, truths, results or credentials to the runtime allowlist, and never pass auth variables to the account. `teardown.mjs` must keep its three guards (own account, stage2 parent, no Administrators in the token). Offline relay tests use same-user children only; never launch anything under another identity in a test.
 - **Verification steps are not evidence of a diagnosis.** Only a verification-only criterion (every pattern a pure re-run phrase) may be met from `verificationSteps`; causal and fix criteria never are. Forbidden recommendations are searched there too.
