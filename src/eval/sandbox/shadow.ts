@@ -1,9 +1,10 @@
 import { z } from 'zod';
-import type { Attempt, CheckItem, ProbeReport, ProbeResult } from './check.ts';
-import { DENIED_CODES } from './check.ts';
+import type { Attempt, CheckItem, CheckReport, ProbeReport, Verdict } from './check.ts';
+import { DENIED_CODES, ProbeResult, reportOf } from './check.ts';
 import { forbiddenReason } from './runtime.ts';
 
-// R4b Step 1D: shadow copies in the enforcement check (designed offline, not wired into run-check yet).
+// R4b Step 1D: shadow copies in the enforcement check. Step 1D.2B wires it into `check --account`
+// (run-check.ts does the I/O; everything here stays pure), still offline: no cross-account run yet.
 // A shadow copy keeps the ACLs a file had when the copy was taken, so a copy from before the deny may
 // still grant the evaluation account read on the repo. Three conditions are kept apart:
 //   A. a copy exists and contains the repo (elevated inventory: the repo folder exists in the copy);
@@ -132,12 +133,15 @@ export type ShadowPlan = {
   copyOf: Record<string, string>;
 };
 
-type PlanOptions = IdentityOptions & { now: Date; maxAgeMs?: number; control?: string };
+// No control parameter: the file read is always SHADOW_CONTROL_FILE, never a caller's or the probe's choice.
+type PlanOptions = IdentityOptions & { now: Date; maxAgeMs?: number };
 
 /**
  * Plans the shadow-copy reads from a validated, complete elevated inventory. Only copies of the repo's
  * volume (by volume GUID) that the inventory shows to contain the repo and the control file are
  * attempted, each through exactly the device path the inventory reported; no device numbers are guessed.
+ * The path is always `<device>\<repo path>\package.json`, built here from the validated device and the
+ * fixed control file; the inventory's own path fields must match it or the copy is not attempted.
  */
 export function planShadowAttempts(raw: unknown, options: PlanOptions): ShadowPlan {
   const items: CheckItem[] = [];
@@ -150,9 +154,8 @@ export function planShadowAttempts(raw: unknown, options: PlanOptions): ShadowPl
   const age = options.now.getTime() - Date.parse(inv.collectedAt);
   if (age < 0) return unusable('its timestamp is in the future');
   if (age > (options.maxAgeMs ?? SHADOW_INVENTORY_MAX_AGE_MS)) return unusable('it is older than the allowed age; collect it again just before the check');
-  const control = options.control ?? SHADOW_CONTROL_FILE;
-  const expectedControl = controlPathInCopy(options.repoRoot, control);
-  const expectedRepo = expectedControl.slice(0, expectedControl.length - control.length - 1);
+  const expectedControl = controlPathInCopy(options.repoRoot);
+  const expectedRepo = expectedControl.slice(0, expectedControl.length - SHADOW_CONTROL_FILE.length - 1);
 
   const drive = options.repoRoot.slice(0, 2);
   const repoVolume = inv.repoVolumeName.toLowerCase();
@@ -211,7 +214,8 @@ export function planShadowAttempts(raw: unknown, options: PlanOptions): ShadowPl
   return { attempts, copyOf, items };
 }
 
-type StabilityOptions = IdentityOptions & { probeStartedAt: Date; probeEndedAt: Date; maxGapMs?: number };
+/** `now`, when given, is when the judgement runs: an inventory dated later than that is refused. */
+type StabilityOptions = IdentityOptions & { probeStartedAt: Date; probeEndedAt: Date; maxGapMs?: number; now?: Date };
 
 /** One copy as the stability check compares it. */
 const copyKey = (c: ShadowCopy) => JSON.stringify([c.id.toLowerCase(), c.device.toLowerCase(), c.volumeName.toLowerCase(), Date.parse(c.createdAt), c.repo.exists, c.control.exists]);
@@ -237,6 +241,7 @@ export function judgeShadowStability(before: unknown, after: unknown, options: S
   if (!(end >= start)) return no('the probe window is invalid');
   if (!(tb <= start && start - tb <= gap)) return no('the inventory before the probe was not taken shortly before it started');
   if (!(ta >= end && ta - end <= gap)) return no('the inventory after the probe was not taken shortly after it ended');
+  if (options.now && ta > options.now.getTime()) return no('the inventory after the probe is dated in the future');
   if (a.inv.repoVolumeName.toLowerCase() !== b.inv.repoVolumeName.toLowerCase()) return no('the repo volume changed');
   const keysBefore = new Set(b.inv.copies.map(copyKey));
   const keysAfter = new Set(a.inv.copies.map(copyKey));
@@ -313,5 +318,109 @@ export function judgeShadowResults(plan: ShadowPlan, results: ProbeResult[], com
 
 /** The probe report without shadow results, for evaluateCheck (which judges the other attempts). */
 export function withoutShadowResults(report: ProbeReport): ProbeReport {
-  return { ...report, results: report.results.filter((r) => !r.id.startsWith(SHADOW_ATTEMPT_PREFIX)) };
+  const keep = (id: string) => !id.startsWith(SHADOW_ATTEMPT_PREFIX);
+  return { ...report, results: report.results.filter((r) => keep(r.id)), ...(report.invalidOkIds ? { invalidOkIds: report.invalidOkIds.filter(keep) } : {}) };
+}
+
+/**
+ * The shadow results of a probe report: the valid ones, plus a bare success for every malformed
+ * entry that still claimed `outcome: "ok"` (parseProbeOutput's invalidOkIds), so a read is judged as
+ * a read before any malformed or duplicate classification.
+ */
+export function shadowResultsOf(report: ProbeReport | null): ProbeResult[] {
+  if (!report) return [];
+  const salvaged = (report.invalidOkIds ?? []).filter((id) => id.startsWith(SHADOW_ATTEMPT_PREFIX)).map((id): ProbeResult => ({ id, outcome: 'ok' }));
+  return [...report.results.filter((r) => r.id.startsWith(SHADOW_ATTEMPT_PREFIX)), ...salvaged];
+}
+
+const SHA256 = z.string().regex(/^[0-9a-f]{64}$/);
+const Item = z.strictObject({ id: z.string().min(1), status: z.enum(['pass', 'fail', 'inconclusive']), detail: z.string(), variant: z.string().optional(), op: z.enum(['read', 'list', 'write']).optional(), code: z.string().optional() });
+const Report = z.strictObject({ verdict: z.enum(['PASS', 'BLOCKER', 'INCONCLUSIVE']), counts: z.strictObject({ pass: z.number(), fail: z.number(), inconclusive: z.number() }), items: z.array(Item) });
+
+/**
+ * What `check --account` keeps in the private state folder until the inventory after the probe
+ * exists. It binds one run together: its random ID, computer, repo and account; the inventory that
+ * planned the reads (raw, re-validated when judged) and its SHA-256; the exact shadow attempts sent
+ * (ID and path); the probe window; the shadow outcomes (codes and hashes only, never contents); the
+ * committed control hashes; and the report of every other check, which the shadow part may add to
+ * but never change. run-check.ts stores it sealed with the SHA-256 of its JSON (ShadowPendingFile).
+ */
+export const ShadowPending = z.strictObject({
+  schema: z.literal(2),
+  runId: z.string().regex(/^[0-9a-f]{32}$/),
+  computer: z.string().min(1),
+  repoRoot: z.string().min(1),
+  account: z.string().min(1),
+  probeStartedAt: ISO,
+  probeEndedAt: ISO,
+  before: z.unknown(),
+  beforeSha256: SHA256,
+  attempts: z.array(z.strictObject({ id: z.string().min(1), path: z.string().min(1) })),
+  results: z.array(ProbeResult),
+  committedHashes: z.array(SHA256),
+  base: Report,
+});
+export type ShadowPending = z.infer<typeof ShadowPending>;
+/** The pending record on disk: the record and the SHA-256 of `JSON.stringify(record)` (detects a truncated or edited record). */
+export const ShadowPendingFile = z.strictObject({ record: z.unknown(), sha256: SHA256 });
+
+/**
+ * Why a pending record can't be judged on this host at all (another computer or repo, an impossible
+ * probe window, duplicate attempts, a base report whose verdict or counts don't follow from its
+ * items), or an empty list. Any problem rejects the record: it never reaches a verdict.
+ */
+export function pendingProblems(pending: ShadowPending, options: IdentityOptions): string[] {
+  const problems: string[] = [];
+  if (pending.computer.toLowerCase() !== options.computer.toLowerCase()) problems.push('it was recorded on another computer');
+  if (pending.repoRoot.toLowerCase() !== options.repoRoot.toLowerCase()) problems.push('it was recorded for another repo');
+  if (!(Date.parse(pending.probeEndedAt) >= Date.parse(pending.probeStartedAt))) problems.push('its probe window is invalid');
+  const ids = pending.attempts.map((a) => a.id);
+  if (new Set(ids).size !== ids.length) problems.push('it lists an attempt twice');
+  if (ids.some((id) => !id.startsWith(SHADOW_ATTEMPT_PREFIX)) || pending.results.some((r) => !r.id.startsWith(SHADOW_ATTEMPT_PREFIX))) problems.push('it holds non-shadow attempts or results');
+  const recount = reportOf(pending.base.items);
+  if (recount.verdict !== pending.base.verdict || (['pass', 'fail', 'inconclusive'] as const).some((s) => recount.counts[s] !== pending.base.counts[s])) problems.push("its report of the other checks doesn't add up");
+  return problems;
+}
+
+/**
+ * Judges the shadow part of one account check. The plan is rebuilt from the recorded `before`
+ * inventory at the probe's start time and must equal the attempts that were sent, ID and path;
+ * `after` null (not taken yet) or unusable leaves the stability item, and so the shadow part,
+ * inconclusive. `now` (when finalizing) refuses an after-inventory dated in the future.
+ */
+export function judgeAccountShadow(pending: ShadowPending, after: unknown, options: IdentityOptions & { now?: Date }): ShadowJudgement {
+  const probeStartedAt = new Date(pending.probeStartedAt);
+  const probeEndedAt = new Date(pending.probeEndedAt);
+  const plan = planShadowAttempts(pending.before, { ...options, now: probeStartedAt });
+  const key = (a: { id: string; path: string }) => JSON.stringify([a.id, a.path]);
+  const planned = plan.attempts.map(key).sort();
+  const sent = pending.attempts.map(key).sort();
+  const extra: CheckItem[] = [];
+  if (planned.length !== sent.length || planned.some((k, i) => k !== sent[i])) {
+    extra.push({ id: 'shadow-attempted-set', status: 'inconclusive', detail: `the probe was sent other shadow reads (${sent.length}) than the inventory plans (${planned.length}); the results can't be matched to the copies` });
+  }
+  const stability = judgeShadowStability(pending.before, after, { ...options, probeStartedAt, probeEndedAt });
+  const judged = judgeShadowResults(plan, pending.results, new Set(pending.committedHashes), stability);
+  return { items: [...judged.items, ...extra], categories: judged.categories };
+}
+
+const SEVERITY: Record<Verdict, number> = { PASS: 0, INCONCLUSIVE: 1, BLOCKER: 2 };
+
+/**
+ * The account check's report with the shadow items appended. The other checks' items stay first and
+ * unchanged; a shadow item that reuses one of their IDs adds an inconclusive `shadow-id-collision`
+ * (both items are kept, neither replaces the other). The verdict is recomputed over all items and is
+ * never better than the base report's own.
+ */
+export function combineWithShadow(base: CheckReport, shadow: CheckItem[]): CheckReport {
+  const baseIds = new Set(base.items.map((i) => i.id));
+  const clashes = [...new Set(shadow.filter((i) => baseIds.has(i.id)).map((i) => i.id))];
+  const combined = reportOf([...base.items, ...shadow, ...(clashes.length > 0 ? [{ id: 'shadow-id-collision', status: 'inconclusive' as const, detail: `shadow items reuse check IDs: ${clashes.join(', ')}` }] : [])]);
+  return SEVERITY[base.verdict] > SEVERITY[combined.verdict] ? { ...combined, verdict: base.verdict } : combined;
+}
+
+/** The combined report of an account check from its pending record and the inventory after the probe (null when not taken). */
+export function finalizeShadow(pending: ShadowPending, after: unknown, options: IdentityOptions & { now?: Date }): { report: CheckReport; categories: ShadowJudgement['categories'] } {
+  const judged = judgeAccountShadow(pending, after, options);
+  return { report: combineWithShadow(pending.base, judged.items), categories: judged.categories };
 }

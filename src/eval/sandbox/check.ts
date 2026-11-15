@@ -9,7 +9,8 @@ import type { ShortPathLookup } from '../workspace.ts';
 // when it runs as the evaluation account. Only a denial by Windows (EACCES/EPERM) counts as
 // blocked; an attempt that didn't run, or failed for another reason, is inconclusive, never a pass.
 // Every attempt has a unique ID. A missing, duplicated, unknown or malformed result never adds up to
-// a PASS, and any forbidden success is a BLOCKER whatever else the probe reported.
+// a PASS, and any forbidden success is a BLOCKER whatever else the probe reported, including one
+// claimed only by a malformed result entry for a requested forbidden attempt (Step 1D.2B).
 // Real truths, scores and credentials are never targets.
 
 export type AttemptOp = 'read' | 'list' | 'write';
@@ -20,11 +21,11 @@ export type Attempt = {
   expect: 'allow' | 'deny';
   /** What the attempt exercises: long, short (8.3), junction, device, unc, ... */
   variant: string;
-  /** For allowed reads: the SHA-256 the probe must report. */
+  /** For reads: the SHA-256 of the sentinel. An allowed read must report it; a forbidden read that reports it is verified access. Never sent to the probe. */
   sha256?: string;
 };
 
-const ProbeResult = z.strictObject({
+export const ProbeResult = z.strictObject({
   id: z.string().min(1),
   outcome: z.enum(['ok', 'error']),
   code: z.string().optional(),
@@ -48,8 +49,12 @@ const ProbeIdentity = z.strictObject({
   tokenGroups: z.array(TokenGroup).nullable(),
 });
 export type ProbeIdentity = z.infer<typeof ProbeIdentity>;
-/** `invalidResults` counts result entries that failed validation and were dropped (parseProbeOutput). */
-export type ProbeReport = { identity: ProbeIdentity; results: ProbeResult[]; invalidResults?: number };
+/**
+ * `invalidResults` counts result entries that failed validation and were dropped (parseProbeOutput);
+ * `invalidOkIds` are the IDs of dropped entries that still claimed `outcome: "ok"`, so a malformed
+ * success can't hide a read.
+ */
+export type ProbeReport = { identity: ProbeIdentity; results: ProbeResult[]; invalidResults?: number; invalidOkIds?: string[] };
 export type TeardownReport = { selected: number; killed: number; remaining: number };
 
 export type Status = 'pass' | 'fail' | 'inconclusive';
@@ -126,7 +131,8 @@ export function plannedAttemptIds(setup: Pick<CheckSetup, 'protectedParents' | '
   for (const { label } of setup.writeTargets) ids.push(`${label}-write`);
   for (const { label } of setup.listTargets) ids.push(`${label}-list`);
   const labels = [...setup.protectedParents, ...setup.writeTargets, ...setup.listTargets].map((t) => t.label);
-  const bad = labels.filter((l) => !/^[a-z][a-z0-9-]*$/.test(l));
+  // `shadow-` IDs belong to the shadow-copy attempts (shadow.ts); no label may produce one.
+  const bad = labels.filter((l) => !/^[a-z][a-z0-9-]*$/.test(l) || /^shadow(-|$)/.test(l));
   if (bad.length > 0) throw new Error(`Invalid check labels: ${bad.join(', ')}.`);
   const duplicates = duplicateIds(ids.map((id) => ({ id })));
   if (duplicates.length > 0) throw new Error(`Check attempts need unique IDs; duplicated: ${duplicates.join(', ')}.`);
@@ -150,19 +156,20 @@ export async function prepareCheck(setup: CheckSetup): Promise<PreparedCheck> {
     attempts.push({ id: 'workspace-read', op: 'read', path: allowed, expect: 'allow', variant: 'long', sha256: sha256(allowedBytes) });
     attempts.push({ id: 'workspace-write', op: 'write', path: setup.workspace, expect: setup.workspaceWrite, variant: 'long' });
 
-    const probes: { label: string; dir: string; file: string }[] = [];
+    const probes: { label: string; dir: string; file: string; sha256: string }[] = [];
     for (const { label, dir } of setup.protectedParents) {
       await mkdir(dir, { recursive: true });
       const probeDir = await mkdtemp(path.join(dir, 'td-acl-probe-'));
       created.push(probeDir);
       const file = path.join(probeDir, 'sentinel.txt');
-      await writeFile(file, randomBytes(64), { flag: 'wx' });
-      probes.push({ label, dir: probeDir, file });
+      const bytes = randomBytes(64);
+      await writeFile(file, bytes, { flag: 'wx' });
+      probes.push({ label, dir: probeDir, file, sha256: sha256(bytes) });
     }
     const shorts = await setup.shortPaths(probes.map((p) => p.file));
     probes.forEach((probe, i) => {
       for (const v of [...aliasVariants(probe.file, shorts[i] ?? null), ...defaultJunctionVariants(probe.file, setup.developerProfile)]) {
-        attempts.push({ id: `${probe.label}-read-${v.variant}`, op: 'read', path: v.path, expect: 'deny', variant: v.variant });
+        attempts.push({ id: `${probe.label}-read-${v.variant}`, op: 'read', path: v.path, expect: 'deny', variant: v.variant, sha256: probe.sha256 });
       }
       attempts.push({ id: `${probe.label}-write`, op: 'write', path: probe.dir, expect: 'deny', variant: 'long' });
       attempts.push({ id: `${probe.label}-list`, op: 'list', path: probe.dir, expect: 'deny', variant: 'long' });
@@ -171,7 +178,7 @@ export async function prepareCheck(setup: CheckSetup): Promise<PreparedCheck> {
       const link = path.join(setup.workspace, `link-${probe.label}-${tag}`);
       await symlink(probe.dir, link, 'junction');
       created.push(link);
-      attempts.push({ id: `${probe.label}-read-junction`, op: 'read', path: path.join(link, 'sentinel.txt'), expect: 'deny', variant: 'junction' });
+      attempts.push({ id: `${probe.label}-read-junction`, op: 'read', path: path.join(link, 'sentinel.txt'), expect: 'deny', variant: 'junction', sha256: probe.sha256 });
     }
     for (const { label, dir } of setup.writeTargets) attempts.push({ id: `${label}-write`, op: 'write', path: dir, expect: 'deny', variant: 'long' });
     for (const { label, dir } of setup.listTargets) attempts.push({ id: `${label}-list`, op: 'list', path: dir, expect: 'deny', variant: 'long' });
@@ -204,16 +211,28 @@ export function judgeAttempt(attempt: Attempt, result: ProbeResult | undefined):
     if (attempt.op === 'read' && result.sha256 !== attempt.sha256) return { ...base, status: 'fail', detail: 'read returned different content' };
     return { ...base, status: 'pass', detail: `allowed ${attempt.op} succeeded${attempt.op === 'read' ? ' (hash matches)' : ''}` };
   }
-  if (result.outcome === 'ok') return { ...base, status: 'fail', detail: `forbidden ${attempt.op} SUCCEEDED${result.count !== undefined ? ` (${result.count} entries)` : ''}` };
+  if (result.outcome === 'ok') return { ...base, status: 'fail', detail: `forbidden ${attempt.op} SUCCEEDED${result.count !== undefined ? ` (${result.count} entries)` : ''} (${accessEvidence(attempt, result)})` };
   if (result.code && DENIED_CODES.has(result.code)) return { ...base, status: 'pass', code: result.code, detail: 'denied by Windows' };
   return { ...base, status: 'inconclusive', code: result.code, detail: `failed with ${result.code}, which is not an access denial` };
 }
 
-/** Several results for one attempt: a forbidden success among them still fails; otherwise the duplicate is inconclusive, never a pass. */
-export function judgeAttemptResults(attempt: Attempt, results: ProbeResult[]): CheckItem {
-  if (results.length <= 1) return judgeAttempt(attempt, results[0]);
+/** Reported is not verified: only a forbidden read returning the sentinel's own hash proves the access independently. */
+function accessEvidence(attempt: Attempt, result: ProbeResult): string {
+  if (attempt.op === 'read' && attempt.sha256 !== undefined && result.sha256 === attempt.sha256) return 'verified: the content matches the sentinel';
+  return 'reported by the probe, not independently verified';
+}
+
+/**
+ * Several results for one attempt: a forbidden success among them still fails; otherwise the duplicate is inconclusive, never a pass.
+ * `malformedSuccesses` counts dropped (malformed) entries with this exact ID that claimed `outcome: "ok"`: for a forbidden
+ * attempt they are a reported success, so a BLOCKER, even next to valid denials. For an allowed attempt they prove nothing.
+ */
+export function judgeAttemptResults(attempt: Attempt, results: ProbeResult[], malformedSuccesses = 0): CheckItem {
+  const malformed = attempt.expect === 'deny' && malformedSuccesses > 0 ? `${malformedSuccesses} malformed result${malformedSuccesses === 1 ? '' : 's'} for this ID claimed success` : null;
+  if (results.length <= 1 && !malformed) return judgeAttempt(attempt, results[0]);
   const failed = results.map((r) => judgeAttempt(attempt, r)).find((j) => j.status === 'fail');
-  if (failed) return { ...failed, detail: `${failed.detail} (one of ${results.length} results for this ID)` };
+  if (failed) return { ...failed, detail: `${failed.detail} (one of ${results.length} results for this ID${malformed ? `; ${malformed}` : ''})` };
+  if (malformed) return { id: attempt.id, variant: attempt.variant, op: attempt.op, status: 'fail', detail: `forbidden ${attempt.op} reported as SUCCEEDED by a malformed result (reported by the probe, not independently verified; ${malformed}, ${results.length} valid)` };
   return { id: attempt.id, variant: attempt.variant, op: attempt.op, status: 'inconclusive', detail: `${results.length} results for one attempt; a duplicate never counts as denied` };
 }
 
@@ -262,23 +281,32 @@ export function judgeTeardown(teardown: TeardownReport | null): CheckItem {
 /**
  * Any fail is a BLOCKER; otherwise anything inconclusive (no probe report, a missing, duplicated,
  * unknown or malformed result, duplicate attempt IDs) is INCONCLUSIVE; PASS needs every item to pass.
+ * A malformed entry claiming success for a requested forbidden attempt fails that attempt; the
+ * malformed-results diagnostic stays. One for an allowed or unrequested ID stays inconclusive.
  * `extra` adds items the caller judged (a refused launch, for example).
  */
 export function evaluateCheck(attempts: Attempt[], probe: ProbeReport | null, expect: Expectations, teardown: TeardownReport | null, extra: CheckItem[] = []): CheckReport {
   const byId = new Map<string, ProbeResult[]>();
   for (const r of probe?.results ?? []) byId.set(r.id, [...(byId.get(r.id) ?? []), r]);
+  const malformedOk = new Map<string, number>();
+  for (const id of probe?.invalidOkIds ?? []) malformedOk.set(id, (malformedOk.get(id) ?? 0) + 1);
   const requested = new Set(attempts.map((a) => a.id));
   const duplicates = duplicateIds(attempts);
   const unknown = [...byId.keys()].filter((id) => !requested.has(id));
   const items: CheckItem[] = [
     ...(duplicates.length > 0 ? [{ id: 'attempt-ids', status: 'inconclusive' as const, detail: `duplicate attempt IDs: ${duplicates.join(', ')}` }] : []),
-    ...attempts.map((a) => judgeAttemptResults(a, byId.get(a.id) ?? [])),
+    ...attempts.map((a) => judgeAttemptResults(a, byId.get(a.id) ?? [], malformedOk.get(a.id) ?? 0)),
     ...(unknown.length > 0 ? [{ id: 'probe-unknown-results', status: 'inconclusive' as const, detail: `${unknown.length} results for attempts that were not requested` }] : []),
     ...(probe?.invalidResults ? [{ id: 'probe-malformed-results', status: 'inconclusive' as const, detail: `${probe.invalidResults} malformed results were dropped` }] : []),
     ...(probe ? judgeIdentity(probe.identity, expect) : [{ id: 'identity', status: 'inconclusive' as const, detail: 'probe produced no valid report' }]),
     judgeTeardown(teardown),
     ...extra,
   ];
+  return reportOf(items);
+}
+
+/** Counts and verdict over the items: any fail is a BLOCKER, then any inconclusive item is INCONCLUSIVE. */
+export function reportOf(items: CheckItem[]): CheckReport {
   const counts: Record<Status, number> = { pass: 0, fail: 0, inconclusive: 0 };
   for (const i of items) counts[i.status]++;
   const verdict: Verdict = counts.fail > 0 ? 'BLOCKER' : counts.inconclusive > 0 ? 'INCONCLUSIVE' : 'PASS';
@@ -302,13 +330,19 @@ export function parseProbeOutput(stdout: string): ProbeReport | null {
   const outer = z.strictObject({ identity: ProbeIdentity, results: z.array(z.unknown()) }).safeParse(value);
   if (!outer.success) return null;
   const results: ProbeResult[] = [];
+  const invalidOkIds: string[] = [];
   let invalidResults = 0;
   for (const entry of outer.data.results) {
     const parsed = ProbeResult.safeParse(entry);
-    if (parsed.success) results.push(parsed.data);
-    else invalidResults++;
+    if (parsed.success) {
+      results.push(parsed.data);
+      continue;
+    }
+    invalidResults++;
+    const loose = entry as { id?: unknown; outcome?: unknown } | null;
+    if (loose && typeof loose === 'object' && typeof loose.id === 'string' && loose.id.length > 0 && loose.outcome === 'ok') invalidOkIds.push(loose.id);
   }
-  return { identity: outer.data.identity, results, invalidResults };
+  return { identity: outer.data.identity, results, invalidResults, invalidOkIds };
 }
 
 export type ObservedTokenFile = { schema: 1; account: string; userSid: string; groups: { sid: string; name: string }[] };

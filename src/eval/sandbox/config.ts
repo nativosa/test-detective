@@ -38,6 +38,9 @@ export const credentialFile = (localAppData: string): string => path.win32.join(
 export const setupStateFile = (localAppData: string): string => path.win32.join(stateDir(localAppData), 'eval-sandbox-state.json');
 /** The evaluation account's token as `check --account` observed it; setup.ps1 -Verify requires it. */
 export const tokenFile = (localAppData: string): string => path.win32.join(stateDir(localAppData), 'eval-token.json');
+/** The elevated shadow-copy inventories around a check (shadow-record.ts writes them), and the check's shadow record waiting for the second one. */
+export const shadowInventoryFile = (localAppData: string, phase: 'before' | 'after'): string => path.win32.join(stateDir(localAppData), `eval-vss-${phase}.json`);
+export const shadowPendingFile = (localAppData: string): string => path.win32.join(stateDir(localAppData), 'eval-shadow-pending.json');
 
 /**
  * The folder setup denies to the group: the repo's top-level folder on its drive (`C:\GIT` for

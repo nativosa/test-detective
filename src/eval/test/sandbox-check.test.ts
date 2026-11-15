@@ -183,6 +183,81 @@ describe('B1: the account-mode check has unique attempt IDs and never masks a fo
   });
 });
 
+describe('forbidden successes in malformed results (Step 1D.2B)', () => {
+  const sentinel = 'd'.repeat(64);
+  const hash = 'a'.repeat(64);
+  const forbidden: Attempt[] = [
+    { id: 'workspace-read', op: 'read', path: 'C:\\td-eval\\work\\a\\allowed.txt', expect: 'allow', variant: 'long', sha256: hash },
+    { id: 'repo-read-long', op: 'read', path: 'C:\\GIT\\x\\sentinel.txt', expect: 'deny', variant: 'long', sha256: sentinel },
+    { id: 'repo-list', op: 'list', path: 'C:\\GIT\\x', expect: 'deny', variant: 'long' },
+    { id: 'repo-write', op: 'write', path: 'C:\\GIT\\x', expect: 'deny', variant: 'long' },
+  ];
+  const valid = (): unknown[] => [{ id: 'workspace-read', outcome: 'ok', sha256: hash }, ...forbidden.slice(1).map((a) => ({ id: a.id, outcome: 'error', code: 'EACCES' }))];
+  const judge = (results: unknown[]) => evaluateCheck(forbidden, parseProbeOutput(JSON.stringify({ identity: SANDBOXED, results })), EXPECT, TEARDOWN);
+  const item = (report: ReturnType<typeof judge>, id: string) => report.items.filter((i) => i.id === id);
+
+  test('a malformed success for a forbidden read, listing or write is a BLOCKER; the malformed diagnostic stays', () => {
+    assert.equal(judge(valid()).verdict, 'PASS');
+    const malformedOk: Record<string, unknown> = {
+      'repo-read-long': { id: 'repo-read-long', outcome: 'ok', sha256: 'NOT-A-HASH' },
+      'repo-list': { id: 'repo-list', outcome: 'ok', count: -1 },
+      'repo-write': { id: 'repo-write', outcome: 'ok', cleaned: 'yes' },
+    };
+    for (const [id, entry] of Object.entries(malformedOk)) {
+      const results = valid().filter((r) => (r as { id: string }).id !== id);
+      const report = judge([...results, entry]);
+      assert.equal(report.verdict, 'BLOCKER', id);
+      const [attempt] = item(report, id);
+      assert.equal(attempt!.status, 'fail', id);
+      assert.match(attempt!.detail, /reported as SUCCEEDED by a malformed result \(reported by the probe, not independently verified/, id);
+      assert.deepEqual(item(report, 'probe-malformed-results').map((i) => i.status), ['inconclusive'], `${id}: the diagnostic is kept`);
+      // Next to a valid denial for the same ID, the claimed success still wins.
+      const withDenial = judge([...valid(), entry]);
+      assert.equal(withDenial.verdict, 'BLOCKER', `${id} with a valid denial`);
+      assert.equal(item(withDenial, id).length, 1, 'one item per attempt: the malformed entry overwrites no other evidence');
+    }
+  });
+
+  test('reported is told apart from verified: only a forbidden read returning the sentinel hash is verified access', () => {
+    const results = valid().filter((r) => (r as { id: string }).id !== 'repo-read-long');
+    const verified = item(judge([...results, { id: 'repo-read-long', outcome: 'ok', sha256: sentinel }]), 'repo-read-long')[0]!;
+    assert.equal(verified.status, 'fail');
+    assert.match(verified.detail, /verified: the content matches the sentinel/);
+    const reported = item(judge([...results, { id: 'repo-read-long', outcome: 'ok', sha256: 'b'.repeat(64) }]), 'repo-read-long')[0]!;
+    assert.equal(reported.status, 'fail');
+    assert.match(reported.detail, /reported by the probe, not independently verified/);
+    const listed = item(judge([...valid().filter((r) => (r as { id: string }).id !== 'repo-list'), { id: 'repo-list', outcome: 'ok', count: 1 }]), 'repo-list')[0]!;
+    assert.match(listed.detail, /SUCCEEDED \(1 entries\) \(reported by the probe, not independently verified\)/);
+    const both = item(judge([...valid().filter((r) => (r as { id: string }).id !== 'repo-read-long'), { id: 'repo-read-long', outcome: 'ok', sha256: sentinel }, { id: 'repo-read-long', outcome: 'ok', sha256: 1 }]), 'repo-read-long')[0]!;
+    assert.match(both.detail, /verified: the content matches the sentinel.*1 malformed result for this ID claimed success/);
+  });
+
+  test('without a credible reported success, malformed, unknown or ambiguous entries stay INCONCLUSIVE', () => {
+    const rest = valid().filter((r) => (r as { id: string }).id !== 'repo-write');
+    for (const [label, entry] of [
+      ['no outcome', { id: 'repo-write', code: 'EACCES', extra: 1 }],
+      ['another outcome', { id: 'repo-write', outcome: 'maybe' }],
+      ['"OK" is not ok', { id: 'repo-write', outcome: 'OK', extra: 1 }],
+      ['an ID in another case', { id: 'REPO-WRITE', outcome: 'ok', extra: 1 }],
+      ['a numeric ID', { id: 7, outcome: 'ok' }],
+      ['not an object', 'ok'],
+      ['an unrequested ID', { id: 'repo-elsewhere-read', outcome: 'ok', extra: 1 }],
+    ] as const) {
+      const report = judge([...rest, entry]);
+      assert.equal(report.verdict, 'INCONCLUSIVE', label);
+      assert.deepEqual(item(report, 'repo-write').map((i) => i.status), ['inconclusive'], label);
+    }
+  });
+
+  test('a malformed success for an allowed control proves nothing: the failed control stays INCONCLUSIVE, never PASS', () => {
+    const report = judge([...valid().slice(1), { id: 'workspace-read', outcome: 'ok', sha256: 'NOT-A-HASH' }]);
+    assert.equal(report.verdict, 'INCONCLUSIVE');
+    assert.deepEqual(item(report, 'workspace-read').map((i) => i.status), ['inconclusive']);
+    const failedControl = judge([{ id: 'workspace-read', outcome: 'error', code: 'EACCES' }, ...valid().slice(1)]);
+    assert.equal(failedControl.verdict, 'INCONCLUSIVE');
+  });
+});
+
 describe('token and launch outcomes', () => {
   test('the token must hold the denied group and no Administrators; an unobserved token is inconclusive', () => {
     const group = 'TESTPC\\td-eval-sandbox';

@@ -357,10 +357,13 @@ describe('static guarantees', () => {
     assert.doesNotMatch(source, /node:(fs|child_process|net|http|https)|readFile|writeFile|spawn|execFile|execSync|fetch\(/);
   });
 
-  test('the shadow checker stays out of the account-mode check until it is approved', () => {
-    for (const file of ['run-check.ts', 'main.ts', 'check.ts', 'launcher.ts']) {
-      assert.doesNotMatch(readFileSync(path.join(REPO_SRC, 'src', 'eval', 'sandbox', file), 'utf8'), /shadow/i, `${file} doesn't use the shadow checker`);
-    }
+  test('the shadow checker is wired into the account-mode check only (Step 1D.2B); the launcher and the probe know nothing of it', () => {
+    const source = (file: string) => readFileSync(path.join(REPO_SRC, 'src', 'eval', 'sandbox', file), 'utf8');
+    assert.match(source('run-check.ts'), /from '\.\/shadow\.ts'/);
+    assert.doesNotMatch(source('launcher.ts'), /shadow/i, "launcher.ts doesn't use the shadow checker");
+    assert.doesNotMatch(source('check.ts'), /from '\.\/shadow\.ts'/, 'check.ts does not import the shadow checker');
+    const self = /export async function runSelfCheck[\s\S]*?\n}\n/.exec(source('run-check.ts'))![0];
+    assert.doesNotMatch(self, /shadow/i, 'self mode has no shadow part');
     assert.doesNotMatch(readFileSync(path.join(REPO_SRC, 'scripts', 'eval-sandbox', 'runtime', 'probe.mjs'), 'utf8'), /shadow|GLOBALROOT/i, 'the probe has no shadow-specific code; it reads only what the host plans');
   });
 

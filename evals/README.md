@@ -299,7 +299,7 @@ The planned R4 boundary: the investigator's Claude Code process (with its tools 
 - Cross-account process launching, real ACL enforcement and the account's authentication are untested.
 - Live R4 evaluation stays blocked until Step 1D.2 has set up the account and `check --account` has passed.
 - The `C:\GIT`-wide deny below is provisional: its scope needs explicit approval before `-Apply`.
-- Shadow copies (elevated `vssadmin list shadows`) must be reviewed before any real ACL change, because a copy taken before the deny keeps the old, readable ACL.
+- Shadow copies (elevated `vssadmin list shadows`) must be reviewed before any real ACL change, because a copy taken before the deny keeps the old, readable ACL. The elevated inventory run before Step 1D.2B found one copy of `C:`, created 2026-11-09, that contains the repo and `package.json` with ACLs granting `BUILTIN\Users` and `Authenticated Users`. Whether the evaluation account can read through it is unknown until `check --account` runs. That copy is preserved: nothing here deletes or changes shadow copies or System Restore.
 
 - **Setup (`scripts/eval-sandbox/setup.ps1`; decisions in `src/eval/sandbox/setup-plan.ts`, run through the minimal entry point `setup-cli.ts`).**
   - Without a switch it is read-only. It inventories:
@@ -391,7 +391,7 @@ The planned R4 boundary: the investigator's Claude Code process (with its tools 
       - the control read hash-correct;
       - the evaluation identity, with the group in the token and no Administrators;
       - a clean teardown.
-    - Any forbidden success is a **BLOCKER**, whatever else was reported.
+    - Any forbidden success is a **BLOCKER**, whatever else was reported. That includes a result entry that fails validation but still claims `outcome: "ok"` for a requested forbidden attempt (read, listing or write), even next to a valid denial for the same ID; `probe-malformed-results` stays as well. The detail says whether the access is verified (a forbidden read that returned the sentinel's own SHA-256, which the probe is never told) or only reported by the probe. A malformed "ok" for an allowed control or an unrequested ID proves nothing and stays INCONCLUSIVE.
     - These are **INCONCLUSIVE**:
       - a missing attempt;
       - another error code (`ENOENT`, `UNKNOWN`, …);
@@ -401,7 +401,7 @@ The planned R4 boundary: the investigator's Claude Code process (with its tools 
   - Attempt IDs are unique by construction: labels are checked before anything is created. This fixes the 1D.1A finding where two checks shared `temp-list` and one could mask the other.
   - `--account` compares the staged runtime with a manifest built from the repo at that moment, never only with the manifest stored beside the copy.
   - `--self` runs the probe as the developer in temp folders to test the machinery. It must end BLOCKER and proves nothing about isolation.
-  - **Shadow copies (designed, not wired in yet; `shadow.ts`, `scripts/eval-sandbox/vss-inventory.ps1`).** A copy keeps the ACLs from when it was taken, so a copy from before the deny may still grant read. Three questions are kept apart:
+  - **Shadow copies (`shadow.ts`, `scripts/eval-sandbox/vss-inventory.ps1`, `shadow-record.ts`; wired into `check --account` in Step 1D.2B, offline only, not run across accounts yet).** A copy keeps the ACLs from when it was taken, so a copy from before the deny may still grant read. Three questions are kept apart:
     - **A.** Does a copy contain the repo?
     - **B.** Does it hold the earlier ACLs?
     - **C.** Can the account read through it?
@@ -418,6 +418,48 @@ The planned R4 boundary: the investigator's Claude Code process (with its tools 
     - a pass needs a Windows denial for every relevant copy and a confirmed unchanged copy set;
     - INCONCLUSIVE, kept as separate categories: a not-found, invalid-device or unsupported error, a missing, duplicated, unknown or malformed result, an undecidable, duplicated or invalid inventory entry, and an incomplete, stale, foreign or unconfirmed inventory.
     - A complete inventory with no copy of the repo's volume that contains the repo: nothing to attempt, which is reported separately from an inventory showing no copies at all.
+
+    **Before/after protocol (Step 1D.2B).** Four steps; the inventories never leave the developer's private folder and are never staged into the runtime:
+    1. Elevated: `scripts\eval-sandbox\vss-inventory.ps1 | node src\eval\sandbox\shadow-record.ts before`. `shadow-record.ts` keeps only the one `TD-VSS-INVENTORY` line (exactly one, a JSON object, schema 2) and writes it atomically (temp file and rename) to `%LOCALAPPDATA%\test-detective\eval-vss-before.json`. It imports only Node built-ins, `config.ts` and `private-state.ts`, because it runs elevated. The inventory script itself still writes nothing. If the elevated shell runs as another administrator, its `%LOCALAPPDATA%` differs and the check finds no inventory (fails closed).
+    2. Not elevated: `check --account`. **Nothing starts** (no workspace, no probe) when:
+       - the before-inventory is missing, unreadable, not JSON, malformed, incomplete, from another computer or repo, dated in the future, or older than 30 minutes;
+       - the staged runtime doesn't match;
+       - a pending record already exists.
+
+       Under the sandbox lock it gets a random run ID. Just before the probe it rebuilds the plan from the inventory and sends the shadow reads with the other attempts. All IDs must be unique, checked before launch, and no check label may start with `shadow`. The reads run only inside the probe, as the evaluation account. The other attempts are judged by `evaluateCheck` without the shadow results, exactly as before. The shadow part is judged apart and appended. The check creates the pending record `eval-shadow-pending.json` and reports INCONCLUSIVE at best, because the second inventory doesn't exist yet. The record is created with a hard link from a complete temp file, so it never replaces an existing file. It is sealed with the SHA-256 of its JSON and holds:
+       - the run ID, computer, repo and account;
+       - the before-inventory and its SHA-256;
+       - the exact shadow attempts sent (ID and path);
+       - the probe window;
+       - the shadow outcomes (codes and hashes only);
+       - the committed hashes of `package.json`;
+       - the other checks' report.
+    3. Elevated: `… | node src\eval\sandbox\shadow-record.ts after`, at most 30 minutes after the probe ended.
+    4. Not elevated: `check --finalize-shadow`. It launches nothing (no probe, no git, no process) and changes nothing, so a repeated or failed finalization leaves the same state.
+       - **The record is rejected (exit 1, no verdict)** when it is missing, edited (seal mismatch), truncated, malformed, from another computer or repo, internally inconsistent (its base verdict or counts don't follow from its items, duplicate or non-shadow attempts, an invalid probe window), or bound to another before-inventory than the one recorded now.
+       - Otherwise it rebuilds the plan from the record's inventory at the probe's start time. The attempts sent must equal it, ID and path (`shadow-attempted-set`). It then judges the stability of the two inventories, judges the results and combines.
+       - An after-inventory dated later than the finalization itself is refused.
+    5. `check --discard-shadow-pending <run ID>` removes the record so the next account check may run. It removes only the exact expected record: intact (seal and schema), of this computer and repo, and of the named run, checked under the sandbox lock and unchanged between reading and removing it. A link, alias or second hard link, an edited, truncated or foreign record, or another run ID is refused and left in place for a person to review and remove by hand. It removes nothing else, except the record's own temp name when a create was interrupted between the hard link and the unlink (same file ID, two names); that state otherwise refuses every use of the record.
+
+    The seal and the bindings catch corruption, careless edits and mixing runs. They are not protection against the developer or anyone else with the developer's rights: such a user can rewrite the record and reseal it. The trusted host is assumed honest.
+
+    **Control file (Section 4).** The probe reads only `package.json`. The path is always `<device>\<repo path>\package.json`. The device comes from the validated inventory and must match `\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN`. The file name is the constant `SHADOW_CONTROL_FILE`, and no caller option can change it. The inventory's own repo and control paths must equal the expected ones, or the copy is not attempted. The probe receives only `{id, op, path}` per attempt, never the expected hashes, the inventory or any state path. It returns only codes and SHA-256s. The host computes the expected hashes from git objects (`git rev-list --all -- package.json`, `git show <commit>:package.json`); nothing in the runtime runs git. A successful read is a BLOCKER whether or not its hash matches a committed version. The hash only changes the detail text.
+
+    **Private state (`private-state.ts`).** All three files are fixed names directly in `%LOCALAPPDATA%\test-detective`, with no destination parameter. These are refused:
+    - a `LOCALAPPDATA` that isn't a plain absolute drive path;
+    - a state folder that is a link, or is reached through another spelling (`realpath` differs: an 8.3 alias or a junction above it);
+    - a file that is a link, not a plain file, or has a second hard link;
+    - a file outside the folder.
+
+    Messages name the files as `%LOCALAPPDATA%\test-detective\<name>`, never by the profile path. None of the files is in the runtime allowlist. Nothing in them is a file content: inventories hold existence and SDDL only, the record holds codes and hashes only.
+
+    Combination (`combineWithShadow`):
+    - The other checks' items come first and unchanged, and shadow items are appended.
+    - A shadow item that reuses one of their IDs adds an inconclusive `shadow-id-collision`; both items stay.
+    - The verdict is recomputed over all items and is never better than the other checks' own verdict.
+    - A missing, linked, unreadable, stale, early, future-dated or inconsistent second inventory leaves the result INCONCLUSIVE.
+
+    **Malformed successes (one rule since the Step 1D.2B review).** A malformed result entry that still claims `outcome: "ok"` (exactly that value, with an ID that is a string) for a requested forbidden attempt is a BLOCKER, for shadow attempts (`invalidOkIds`, `shadowResultsOf`) and ordinary ones (`evaluateCheck`) alike. It is judged before any malformed or duplicate classification, and `probe-malformed-results` stays as a diagnostic. The base report never sees shadow claims (`withoutShadowResults`). Without such a claim, malformed, unknown or ambiguous entries stay INCONCLUSIVE. Regression tests pin reads, listings and writes.
 - **Runtime copy (`src/eval/sandbox/runtime.ts`; `main.ts runtime-manifest [--stage]`).**
   - An explicit allowlist:
     - `src/mcp/*.ts`, plus a generated `package.json`;
