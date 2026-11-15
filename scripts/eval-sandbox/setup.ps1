@@ -61,6 +61,30 @@ function Stop-Setup([string]$Message, [int]$Code = 1) {
   exit $Code
 }
 
+# The on-disk spelling of a drive path: every existing component as the directory lists it (long name, its own
+# casing; an 8.3 alias resolves to the long name), the drive letter upper-case, a missing tail as given. The plan
+# and its hash then don't depend on how the path was typed. Nothing is followed or created; "." / ".." and
+# components Windows would trim (trailing dots or spaces) are refused.
+function Get-CanonicalPath([string]$Path) {
+  if ($Path -notmatch $DrivePath) { Stop-Setup "Not an absolute drive path: $Path" }
+  $parts = $Path.Split('\')
+  $current = $parts[0].ToUpperInvariant() + '\'
+  $exists = $true
+  for ($i = 1; $i -lt $parts.Count; $i++) {
+    $part = $parts[$i]
+    if ($part -eq '.' -or $part -eq '..' -or $part -ne $part.TrimEnd(' ', '.')) { Stop-Setup "Path component '$part' in $Path is not allowed." }
+    if ($exists) {
+      try { $found = @(([System.IO.DirectoryInfo]$current).GetFileSystemInfos($part)) }
+      catch { Stop-Setup "Cannot read the on-disk spelling of $current\$part ($($_.Exception.GetType().Name))." }
+      if ($found.Count -gt 1) { Stop-Setup "$current has more than one entry matching '$part'." }
+      if ($found.Count -eq 1) { $part = $found[0].Name } else { $exists = $false }
+    }
+    $current = if ($i -eq 1) { $current + $part } else { "$current\$part" }
+  }
+  if ($current -notmatch $DrivePath) { Stop-Setup "Not an absolute drive path: $current" }
+  $current
+}
+
 # ---------------------------------------------------------------------------
 # Arguments
 
@@ -71,6 +95,7 @@ if ($WhatIfPreference -and $Mode -notin 'apply', 'remove') { Stop-Setup '-WhatIf
 foreach ($n in $Account, $Group) { if ($n -notmatch $NamePattern) { Stop-Setup "Invalid account or group name: $n" } }
 if ($Account -eq $Group) { Stop-Setup 'The account and the group need different names.' }
 if (-not $DenyRoot) {
+  $RepoRoot = Get-CanonicalPath $RepoRoot
   if ($RepoRoot -notmatch '^([A-Za-z]:)\\([^\\]+)') { Stop-Setup "Cannot derive the deny root from $RepoRoot" }
   $DenyRoot = "$($Matches[1].ToUpper())\$($Matches[2])"
 }
@@ -81,6 +106,8 @@ $CredentialFile = Join-Path $SecretDir 'eval-account.xml'
 $StateFile = Join-Path $SecretDir 'eval-sandbox-state.json'
 $TokenFile = Join-Path $SecretDir 'eval-token.json'
 foreach ($p in $SandboxRoot, $DenyRoot, $SecretDir) { if ($p -notmatch $DrivePath) { Stop-Setup "Not an absolute drive path: $p" } }
+$DenyRoot = Get-CanonicalPath $DenyRoot
+$SandboxRoot = Get-CanonicalPath $SandboxRoot
 foreach ($p in $SecretDir, $CredentialFile, $StateFile, "$StateFile.tmp", $TokenFile) {
   $existing = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
   if ($existing -and ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { Stop-Setup "$p is a link; refusing to read or write through it." }

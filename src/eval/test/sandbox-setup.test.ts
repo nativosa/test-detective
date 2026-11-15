@@ -621,9 +621,9 @@ describe('setup.ps1 on disposable folders (no account, group, ACL or real applic
     const name = `tdt${Date.now().toString(36).slice(-6)}`;
     const args = ['-Account', `${name}a`, '-Group', `${name}g`, '-SandboxRoot', path.join(tmp, 'sandbox'), '-DenyRoot', deny];
     const secret = path.join(appData, 'test-detective');
-    const run = async (extra: string[]) => {
+    const run = async (extra: string[], base: string[] = args) => {
       try {
-        const { stdout, stderr } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SETUP_SCRIPT, ...args, ...extra], { env: { ...process.env, LOCALAPPDATA: appData }, windowsHide: true, timeout: 120_000, maxBuffer: 32 * 1024 * 1024 });
+        const { stdout, stderr } = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SETUP_SCRIPT, ...base, ...extra], { env: { ...process.env, LOCALAPPDATA: appData }, windowsHide: true, timeout: 120_000, maxBuffer: 32 * 1024 * 1024 });
         return { code: 0, stdout, stderr };
       } catch (error) {
         const e = error as { code: number; stdout: string; stderr: string };
@@ -667,6 +667,41 @@ describe('setup.ps1 on disposable folders (no account, group, ACL or real applic
     assert.equal(again.sha256, parsed.sha256, 'nothing changed in between');
     await writeFile(path.join(s.deny, 'repo-c.txt'), '');
     assert.notEqual((JSON.parse((await s.run(['-Json'])).stdout) as { sha256: string }).sha256, parsed.sha256, 'a new top-level entry changes the reviewed hash');
+  });
+
+  test('the deny and sandbox roots use their on-disk spelling: casing and an 8.3 alias give the same plan and hash; "." and ".." are refused', async (t) => {
+    const s = await sandbox(t);
+    const deny = path.join(s.tmp, 'Deny Root Mixed');
+    await mkdir(path.join(deny, 'Repo-A'), { recursive: true });
+    await mkdir(path.join(s.tmp, 'Sandbox Root'));
+    const withRoots = (denyRoot: string, sandboxRoot = path.join(s.tmp, 'Sandbox Root', 'td')) =>
+      s.args.map((a, i) => (s.args[i - 1] === '-DenyRoot' ? denyRoot : s.args[i - 1] === '-SandboxRoot' ? sandboxRoot : a));
+    const short = (await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(New-Object -ComObject Scripting.FileSystemObject).GetFolder('${deny}').ShortPath`], { windowsHide: true })).stdout.trim();
+    const spellings = [deny, deny.toLowerCase(), deny.toUpperCase(), `${deny[0]!.toLowerCase()}${deny.slice(1)}`];
+    if (path.basename(short) !== path.basename(deny)) spellings.push(short);
+    else t.diagnostic('8.3 names are disabled on this volume; the alias case is skipped');
+
+    const plans: { sha256: string; actions: { kind: string; description: string }[] }[] = [];
+    for (const spelling of spellings) {
+      const r = await s.run(['-Json'], withRoots(spelling));
+      assert.equal(r.code, 0, r.stderr);
+      plans.push(JSON.parse(r.stdout) as (typeof plans)[number]);
+    }
+    assert.ok(plans.every((p) => p.sha256 === plans[0]!.sha256), `every spelling gives one plan identity (${spellings.length} spellings)`);
+    assert.match(plans[0]!.actions.find((a) => a.kind === 'add-deny-ace')!.description, new RegExp(`on ${deny.replaceAll('\\', '\\\\')}, inherited`), 'the deny root is named with its on-disk casing');
+    assert.match(plans[0]!.actions.find((a) => a.kind === 'add-deny-ace')!.description, /: 1 items in 1 top-level entries \(Repo-A\)/, 'same scope: item count and top-level entries');
+
+    const inv = Inventory.parse(JSON.parse((await s.run(['-InventoryOnly'], withRoots(deny.toUpperCase(), path.join(s.tmp, 'SANDBOX ROOT', 'td')))).stdout));
+    assert.equal(inv.config.denyRoot, deny);
+    assert.equal(inv.denyRoot.path, deny);
+    assert.equal(inv.config.root, path.join(s.tmp, 'Sandbox Root', 'td'), 'an existing prefix takes its on-disk casing, the missing tail stays as given');
+
+    for (const bad of [`${deny}\\..\\Deny Root Mixed`, `${deny}\\.`, `${deny}.`]) {
+      const r = await s.run(['-Json'], withRoots(bad));
+      assert.equal(r.code, 1, `${bad} is refused`);
+      assert.match(r.stderr, /is not allowed|Not an absolute drive path/);
+    }
+    assert.deepEqual(await readdir(s.appData), [], 'nothing was written');
   });
 
   test('-InventoryOnly: the inventory validates, every scanned item is in exactly one ACL shape or a link, and the runtime is scanned', async (t) => {

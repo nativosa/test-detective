@@ -311,7 +311,7 @@ The planned R4 boundary: the investigator's Claude Code process (with its tools 
 
     Then it prints every planned change and the plan's SHA-256. `-InventoryOnly` prints the raw inventory.
   - On this machine the plan explains why `C:\GIT` is open today: `BUILTIN\Users` ReadAndExecute and `Authenticated Users` Modify, both inherited from `C:\`. The fix is one explicit Deny FullControl ACE for the group `td-eval-sandbox`, inherited by everything below; no existing ACE changes.
-  - **The deny covers everything under `C:\GIT`, not only this repo.** The add-deny-ace description, and so the reviewed hash, names every top-level entry and the item count. A new repo, file or item changes the hash, and `-Apply` then refuses. On 2026-11-14 the scope was 55,911 items in 6 top-level entries (this repo, four other repos and one personal file).
+  - **The deny covers everything under `C:\GIT`, not only this repo.** The add-deny-ace description, and so the reviewed hash, names every top-level entry and the item count. A new repo, file or item changes the hash, and `-Apply` then refuses. The deny and sandbox roots are spelled as on disk (each existing component as its directory lists it, so `C:\git`, `C:\GIT` and an 8.3 alias give the same plan); `.`/`..` components are refused. On 2026-11-14 the scope was 55,911 items in 6 top-level entries (this repo, four other repos and one personal file).
   - The plan also creates:
     - the group;
     - the standard user `td-eval`, a member of `Users` and the group only;
